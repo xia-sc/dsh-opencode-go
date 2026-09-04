@@ -1,5 +1,11 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import os from "node:os";
+import path from "node:path";
+import fs from "node:fs";
+// Isolate the usage ledger: apply() creates a real ledger under DSH_HOME,
+// so point it at a temp dir (archived-chats precedent). Must run before tests.
+process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "zen-go-smoke-"));
 import {
   CHAT_MODEL_IDS,
   Config,
@@ -13,18 +19,23 @@ import {
   buildHeaders,
   buildResponsesBody,
   collectImageRefs,
+  createUsageLedger,
+  dayKey,
   endpointOf,
   httpError,
   imagePart,
   mapAnthropicStop,
   mapFinishReason,
+  meteredStream,
   modelSupportsImage,
   parseRetryAfterMs,
   parseSseData,
+  pluginDataDir,
   REASONING_EFFORTS,
   reasoningFor,
   resolveOptions,
   sessionHeaderValue,
+  summarize,
   toAnthropicMessages,
   toOpenAiMessages,
   toResponsesInput,
@@ -648,4 +659,100 @@ test("modelCaps attach context and defaultMaxTokens", async () => {
   assert.throws(() => resolveOptions({ modelCaps: [{ id: "" }] }), /non-empty id/);
   assert.throws(() => resolveOptions({ modelCaps: [{ id: "x", contextWindow: -5 }] }), /positive integer/);
   assert.throws(() => resolveOptions({ modelCaps: "nope" }), /must be an array/);
+});
+
+test("meteredStream records exactly once per outcome", async () => {
+  const seen = [];
+  async function* chunks(list) {
+    for (const c of list) yield c;
+  }
+  const got = [];
+  for await (const c of meteredStream(chunks([{ type: "usage", usage: { inputTokens: 10, outputTokens: 2, totalTokens: 12, cacheReadTokens: 4 } }, { type: "finish", reason: { kind: "stop" } }]), { t: 1, model: "m", session: "s", purpose: null }, (e) => seen.push(e))) {
+    got.push(c);
+  }
+  assert.equal(got.length, 2);
+  assert.deepEqual(seen, [{ t: 1, model: "m", session: "s", purpose: null, input: 10, output: 2, cacheRead: 4, cacheWrite: 0, reasoning: 0, finish: "stop" }]);
+  // error path records and rethrows
+  const seen2 = [];
+  const boom = new Error("x");
+  boom.code = "TRANSPORT";
+  async function* failGen() {
+    yield { type: "block-start", index: 0, blockType: "text" };
+    throw boom;
+  }
+  await assert.rejects((async () => {
+    for await (const c of meteredStream(failGen(), { t: 2, model: "m", session: null, purpose: "compaction" }, (e) => seen2.push(e))) void c;
+  })(), /x/);
+  assert.deepEqual(seen2, [{ t: 2, model: "m", session: null, purpose: "compaction", input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, finish: "error:TRANSPORT" }]);
+  // quiet abort records zero counters
+  const seen3 = [];
+  async function* empty() {}
+  for await (const c of meteredStream(empty(), { t: 3, model: "m" }, (e) => seen3.push(e))) void c;
+  assert.deepEqual(seen3[0].finish, "aborted");
+  assert.equal(seen3[0].input, 0);
+});
+
+test("ledger persists, loads, summarizes and resets", async () => {
+  const mem = {};
+  const io = {
+    readFile: async (p) => {
+      if (!(p in mem)) {
+        const e = new Error("missing");
+        e.code = "ENOENT";
+        throw e;
+      }
+      return mem[p];
+    },
+    writeFile: async (p, text) => { mem[p] = text; },
+    appendFile: async (p, text) => { mem[p] = (mem[p] ?? "") + text; },
+    mkdir: async () => {},
+    rename: async (a, b) => { mem[b] = mem[a]; delete mem[a]; },
+  };
+  const ledger = createUsageLedger({ dir: "/data", io, now: () => 1700000000000 });
+  const loaded = await ledger.load();
+  assert.deepEqual(loaded, { loaded: 0, skipped: 0 });
+  await ledger.record({ model: "mimo-v2.5", session: "s1", input: 100, output: 10, cacheRead: 50, finish: "stop" });
+  await ledger.record({ model: "mimo-v2.5", session: "s1", input: 200, output: 20, cacheRead: 0, finish: "stop" });
+  await ledger.record({ model: "muse-spark-1.3-contributor", session: "s2", purpose: "compaction", input: 10, output: 5, finish: "stop" });
+  assert.equal(ledger.size, 3);
+  const usagePath = path.join("/data", "usage.jsonl");
+  assert.ok(mem[usagePath].split("\n").filter((l) => l.trim() !== "").length === 3);
+  const sum = ledger.summary(100000);
+  assert.equal(sum.totals.requests, 3);
+  assert.equal(sum.totals.input, 310);
+  assert.equal(sum.totals.cacheRead, 50);
+  assert.equal(sum.totals.sessions, 2);
+  assert.equal(sum.byModel[0].model, "mimo-v2.5");
+  assert.equal(sum.byModel[0].input, 300);
+  assert.ok(sum.days.length >= 1 && sum.days[0].requests >= 1);
+  // reload from disk
+  const ledger2 = createUsageLedger({ dir: "/data", io, now: () => 1700000000000 });
+  const loaded2 = await ledger2.load();
+  assert.equal(loaded2.loaded, 3);
+  assert.equal(ledger2.summary(100000).totals.requests, 3);
+  // bad lines are skipped, reset archives
+  mem[usagePath] += "not-json\n";
+  const ledger3 = createUsageLedger({ dir: "/data", io, now: () => 1700000000000 });
+  const loaded3 = await ledger3.load();
+  assert.deepEqual(loaded3, { loaded: 3, skipped: 1 });
+  const reset = await ledger3.reset();
+  assert.match(reset.archived, /^usage-\d+-\d+\.bak\.jsonl$/);
+  assert.equal(ledger3.size, 0);
+  assert.equal(ledger3.summary(100000).totals.requests, 0);
+});
+
+test("dayKey buckets local days and pluginDataDir respects DSH_HOME", () => {
+  assert.match(dayKey(1700000000000), /^\d{4}-\d{2}-\d{2}$/);
+  assert.ok(pluginDataDir("/tmp/x").endsWith("dsh-opencode-go"));
+});
+
+test("rpc usage endpoints serve the ledger", async () => {
+  const { ctx, calls } = stubCtx({ credentials: { resolve: async () => ({ value: "k" }) } });
+  apply(ctx, {});
+  const empty = await calls.rpc.handler("usage/summary", { args: {} }, undefined);
+  assert.equal(empty.ok, true);
+  assert.equal(empty.value.totals.requests, 0);
+  const reset = await calls.rpc.handler("usage/reset", { args: {} }, undefined);
+  assert.equal(reset.ok, true);
+  assert.match(reset.value.archived, /\.bak\.jsonl$/);
 });

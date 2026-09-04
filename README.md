@@ -25,6 +25,9 @@ DeepSeek Harness 的 OpenCode Go LLM provider 插件：注册 `zen-go` 路由，
   未知 id 默认放行，服务端说了算。
 - **用量**：三端面 usage 统一换算（`prompt_tokens` / `input_tokens` 双词汇），
   输入输出总量原样保留，缓存读/写、reasoning token 分桶上报。
+- **用量账本**：每次调用记一条（模型/会话/用途/输入输出/缓存读写/推理/finish），
+  落 `$DSH_HOME/plugin-data/dsh-opencode-go/usage.jsonl`（append-only，清空时归档，
+  不出网）；卡片里按模型汇总 + GitHub 式日历热力图（按日输入量分档），可一键清空。
 
 路由刻意叫 `zen-go` 而不是 `opencode-go`——后者是用户自建 pi-ai profile
 的常用名，llm 注册表单路由独占，撞名会顶掉别人的路由；`apply()` 启动时
