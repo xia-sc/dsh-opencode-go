@@ -35,7 +35,7 @@
 			tabActive: { fontWeight: 600 },
 			statTable: { width: "100%", fontSize: 13, lineHeight: "24px", borderCollapse: "collapse" },
 			dayPanel: { display: "flex", flexDirection: "column", gap: 8, padding: 10, borderRadius: 12, border: "1px solid var(--dsw-alias-border-l3, #444)" },
-			mono: { textAlign: "left", padding: "2px 4px", maxWidth: 200, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontSize: 11, opacity: 0.85 },
+			mono: { textAlign: "left", padding: "2px 4px", fontSize: 11, lineHeight: "16px", opacity: 0.9, whiteSpace: "normal", wordBreak: "break-all" },
 			statCell: { textAlign: "right", padding: "2px 4px", whiteSpace: "nowrap", fontVariantNumeric: "tabular-nums" },
 			statHead: { textAlign: "right", padding: "2px 4px", opacity: 0.6, fontWeight: 400, whiteSpace: "nowrap" },
 			statModel: { textAlign: "left", padding: "2px 4px", maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }
