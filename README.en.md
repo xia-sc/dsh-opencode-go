@@ -41,8 +41,9 @@ header on every outbound inference request.
 - **Usage ledger**: one row per call (model/session/purpose/in/out/cache
   read/write/reasoning/finish) in
   `$DSH_HOME/plugin-data/dsh-opencode-go/usage.jsonl` (append-only, archived
-  on clear, never leaves the machine); the card shows per-model totals plus a
-  GitHub-style daily heatmap (bucketed by daily input), with one-click clear.
+  on clear, never leaves the machine); the card shows an Overview/Models tab
+  pair with a large-cell daily heatmap plus a per-model table, with one-click
+  clear.
 
 The route is deliberately named `zen-go`, not `opencode-go` — the latter is the
 natural name for user-owned pi-ai custom profiles, and the llm registry allows

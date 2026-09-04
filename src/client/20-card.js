@@ -10,8 +10,18 @@
 			if (denom <= 0) return "—";
 			return Math.round((cacheRead / denom) * 100) + "%";
 		}
-		function renderStats(t, store, st) {
+		function renderStats(t, store, st, tab, setTab) {
 			var summary = st.summary;
+			var tabBtn = function (key, label) {
+				var active = tab === key;
+				return h("button", {
+					key: "tab-" + key,
+					type: "button",
+					style: active ? Object.assign({}, S.button, S.primary, S.tabActive) : S.button,
+					disabled: st.busy !== null,
+					onClick: function () { setTab(key); }
+				}, label);
+			};
 			var head = h("div", { key: "shead", style: S.row },
 				h("span", { key: "slabel", style: S.label }, t("stats.title")),
 				h("button", {
@@ -33,8 +43,40 @@
 					}
 				}, t("stats.reset"))
 			);
-			if (!summary) return h("div", { key: "stats", style: S.root }, head, h("div", { key: "sempty", style: S.meta }, t("stats.empty")));
+			var tabs = h("div", { key: "stabs", style: S.tabs },
+				tabBtn("overview", t("stats.tabOverview")),
+				tabBtn("models", t("stats.tabModels"))
+			);
+			if (!summary) return h("div", { key: "stats", style: S.root }, head, tabs, h("div", { key: "sempty", style: S.meta }, t("stats.empty")));
 			var totals = summary.totals;
+			var grand = totals.input + totals.output + totals.cacheRead + totals.cacheWrite;
+			var totalsLine = t("stats.total") + " " + fmtTokens(grand) + " " + t("stats.tokens") + " · " +
+				t("stats.in") + " " + fmtTokens(totals.input) + " · " +
+				t("stats.cache") + " " + fmtTokens(totals.cacheRead) + " · " +
+				t("stats.out") + " " + fmtTokens(totals.output) + " · " +
+				totals.requests + " " + t("stats.calls") + " · " +
+				totals.sessions + " " + t("stats.sessions");
+			if (tab === "models") {
+				return h("div", { key: "stats", style: S.root }, head, tabs,
+					h("div", { key: "stotals", style: S.meta }, totalsLine),
+					h("table", { key: "stable", style: S.statTable },
+						h("thead", { key: "shead2" }, h("tr", { key: "hr" },
+							h("th", { key: "hm", style: Object.assign({}, S.statModel, S.statHead) }, t("stats.model")),
+							h("th", { key: "hr2", style: S.statHead }, t("stats.colRequests")),
+							h("th", { key: "hio", style: S.statHead }, t("stats.colIO")),
+							h("th", { key: "hc", style: S.statHead }, t("stats.colCache"))
+						)),
+						h("tbody", { key: "sbody" }, (summary.byModel || []).map(function (row) {
+							return h("tr", { key: row.model },
+								h("td", { key: "m", style: S.statModel, title: row.model }, row.model),
+								h("td", { key: "r", style: S.statCell }, String(row.requests)),
+								h("td", { key: "io", style: S.statCell }, fmtTokens(row.input) + " / " + fmtTokens(row.output)),
+								h("td", { key: "c", style: S.statCell }, cacheRate(row.input, row.cacheRead))
+							);
+						}))
+					)
+				);
+			}
 			var days = (summary.days || []).slice().sort(function (a, b) { return a.date < b.date ? -1 : 1; });
 			var max = 0;
 			days.forEach(function (d) { max = Math.max(max, d.input); });
@@ -88,26 +130,11 @@
 					h("span", { key: "lm" }, t("stats.more"))
 				)
 			);
-			var table = h("table", { key: "stable", style: S.statTable },
-				h("tbody", { key: "sbody" }, (summary.byModel || []).map(function (row) {
-					return h("tr", { key: row.model },
-						h("td", { key: "m", style: S.statModel, title: row.model }, row.model),
-						h("td", { key: "r", style: S.statCell }, String(row.requests)),
-						h("td", { key: "io", style: S.statCell }, fmtTokens(row.input) + " / " + fmtTokens(row.output)),
-						h("td", { key: "c", style: S.statCell }, cacheRate(row.input, row.cacheRead))
-					);
-				}))
-			);
-			var totalsLine = totals.requests + " " + t("stats.requests") + " · " +
-				totals.sessions + " " + t("stats.sessions") + " · " +
-				t("stats.in") + " " + fmtTokens(totals.input) + " · " +
-				t("stats.out") + " " + fmtTokens(totals.output) + " · " +
-				t("stats.cache") + " " + cacheRate(totals.input, totals.cacheRead);
 			return h("div", { key: "stats", style: S.root },
 				head,
+				tabs,
 				h("div", { key: "stotals", style: S.meta }, totalsLine),
-				grid,
-				table
+				h("div", { key: "heatscroll", style: S.heatScroll }, grid)
 			);
 		}
 
@@ -121,6 +148,9 @@
 				return store.subscribe(function () { setSt(store.snapshot()); });
 			}, [store]);
 			React.useEffect(function () { store.refreshStats(t); }, [store]);
+			var tabPair = React.useState("overview");
+			var statsTab = tabPair[0];
+			var setStatsTab = tabPair[1];
 			var keyConfigured = st.keyConfigured === true || (st.keyConfigured === null && props.keyConfigured === true);
 			var settings = st.settings || {};
 			var enabled = Array.isArray(settings.enabledModels) ? settings.enabledModels : null;
@@ -239,7 +269,7 @@
 			if (settings.apiBase) {
 				children.push(h("div", { key: "endpoint", style: S.meta }, t("endpoint.note", { base: settings.apiBase })));
 			}
-			children.push(renderStats(t, store, st));
+			children.push(renderStats(t, store, st, statsTab, setStatsTab));
 			if (st.error) children.push(h("div", { key: "err", style: S.error }, t("error.prefix") + st.error));
 			if (st.notice) children.push(h("div", { key: "ok", style: S.ok }, st.notice));
 			return h("div", { style: S.root }, children);
