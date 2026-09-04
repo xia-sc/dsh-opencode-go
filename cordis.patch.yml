@@ -1,0 +1,15 @@
+# @dsh-plugins/dsh-opencode-go — host-only bundle layer.
+#
+# Pure host-side provider plugin (no browser half): registers the `opencode-go`
+# provider route on ctx.llm. All outbound inference requests carry
+# `x-opencode-session` (stable per conversation, from GenerateOptions.sessionId)
+# plus the mandatory harness attribution headers.
+#
+# `name` must be the FULL package specifier as installed in the profile's
+# node_modules (pnpm links packages by their true scoped name). Quote the value:
+# a YAML scalar starting with `@` fails to parse unquoted.
+- insert:
+    - id: llm-opencode-go
+      name: "@dsh-plugins/dsh-opencode-go"
+      config:
+        apiKeyEnv: OPENCODE_GO_API_KEY
