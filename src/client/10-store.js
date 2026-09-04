@@ -5,7 +5,7 @@
 		 */
 		function createZenGoStore(ctx, scope, credentials) {
 			var listeners = new Set();
-			var state = { keyDraft: "", busy: null, error: null, notice: null, live: null, liveAt: 0, keyConfigured: null, summary: null, statsLoaded: false };
+			var state = { keyDraft: "", busy: null, error: null, notice: null, live: null, liveAt: 0, keyConfigured: null, summary: null, statsLoaded: false, dayDetail: null };
 			function snapshot() {
 				var snap = {};
 				try { snap = scope.getSnapshot() || {}; } catch (ignore) { snap = {}; }
@@ -19,7 +19,8 @@
 					liveAt: state.liveAt,
 					keyConfigured: state.keyConfigured,
 					summary: state.summary,
-					statsLoaded: state.statsLoaded
+					statsLoaded: state.statsLoaded,
+					dayDetail: state.dayDetail
 				};
 			}
 			function emit() {
@@ -155,7 +156,18 @@
 							return store.refreshStats(t);
 						})
 						.catch(function (e) { set({ busy: null, error: (e && e.message) || String(e) }); });
-				}
+				},
+				fetchDay: function (t, date) {
+					set({ busy: "stats", error: null });
+					return Promise.resolve()
+						.then(function () { return ctx.connection.rpc.call("/zen-go-rpc", "usage/day", { args: { date: date } }); })
+						.then(function (res) {
+							if (res && res.ok === true && res.value) set({ busy: null, dayDetail: { date: date, data: res.value } });
+							else set({ busy: null, error: resultError(res, t("error.prefix") + "stats") });
+						})
+						.catch(function (e) { set({ busy: null, error: (e && e.message) || String(e) }); });
+				},
+				clearDay: function () { set({ dayDetail: null }); }
 			};
 			return store;
 		}

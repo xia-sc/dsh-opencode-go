@@ -38,12 +38,13 @@ header on every outbound inference request.
 - **Usage**: normalized across all three surfaces (both `prompt_tokens` and
   `input_tokens` vocabularies), provider totals preserved verbatim, cache
   reads/writes and reasoning tokens reported in separate buckets.
-- **Usage ledger**: one row per call (model/session/purpose/in/out/cache
-  read/write/reasoning/finish) in
+- **Usage ledger**: one row per call (model/session/sent `x-opencode-session`/
+  purpose/in/out/cache read/write/reasoning/finish) in
   `$DSH_HOME/plugin-data/dsh-opencode-go/usage.jsonl` (append-only, archived
   on clear, never leaves the machine); the card shows an Overview/Models tab
   pair with a large-cell daily heatmap plus a per-model table, with one-click
-  clear.
+  clear. **Click any heatmap day** to expand that day's totals plus a
+  per-dsh-session breakdown (including the actually sent session header).
 
 The route is deliberately named `zen-go`, not `opencode-go` — the latter is the
 natural name for user-owned pi-ai custom profiles, and the llm registry allows

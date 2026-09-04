@@ -36,6 +36,7 @@ import {
   resolveOptions,
   sessionHeaderValue,
   summarize,
+  summarizeDay,
   toAnthropicMessages,
   toOpenAiMessages,
   toResponsesInput,
@@ -671,7 +672,7 @@ test("meteredStream records exactly once per outcome", async () => {
     got.push(c);
   }
   assert.equal(got.length, 2);
-  assert.deepEqual(seen, [{ t: 1, model: "m", session: "s", purpose: null, input: 10, output: 2, cacheRead: 4, cacheWrite: 0, reasoning: 0, finish: "stop" }]);
+  assert.deepEqual(seen, [{ t: 1, model: "m", session: "s", sessionHeader: null, purpose: null, input: 10, output: 2, cacheRead: 4, cacheWrite: 0, reasoning: 0, finish: "stop" }]);
   // error path records and rethrows
   const seen2 = [];
   const boom = new Error("x");
@@ -683,7 +684,7 @@ test("meteredStream records exactly once per outcome", async () => {
   await assert.rejects((async () => {
     for await (const c of meteredStream(failGen(), { t: 2, model: "m", session: null, purpose: "compaction" }, (e) => seen2.push(e))) void c;
   })(), /x/);
-  assert.deepEqual(seen2, [{ t: 2, model: "m", session: null, purpose: "compaction", input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, finish: "error:TRANSPORT" }]);
+  assert.deepEqual(seen2, [{ t: 2, model: "m", session: null, sessionHeader: null, purpose: "compaction", input: 0, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, finish: "error:TRANSPORT" }]);
   // quiet abort records zero counters
   const seen3 = [];
   async function* empty() {}
@@ -755,4 +756,58 @@ test("rpc usage endpoints serve the ledger", async () => {
   const reset = await calls.rpc.handler("usage/reset", { args: {} }, undefined);
   assert.equal(reset.ok, true);
   assert.match(reset.value.archived, /\.bak\.jsonl$/);
+});
+
+test("summarizeDay groups by session with sent headers", () => {
+  const day = "2026-09-04";
+  const t0 = new Date(day + "T10:00:00").getTime();
+  const records = [
+    { t: t0, model: "mimo-v2.5", session: "s1", sessionHeader: "s1", purpose: null, input: 100, output: 10, cacheRead: 40, cacheWrite: 0, reasoning: 0, finish: "stop" },
+    { t: t0 + 1000, model: "mimo-v2.5", session: "s1", sessionHeader: "s1", purpose: null, input: 200, output: 20, cacheRead: 0, cacheWrite: 0, reasoning: 0, finish: "stop" },
+    { t: t0 + 2000, model: "muse-spark-1.3-contributor", session: null, sessionHeader: "fb-uuid", purpose: null, input: 5, output: 1, cacheRead: 0, cacheWrite: 0, reasoning: 0, finish: "stop" },
+    { t: t0 - 86400000, model: "mimo-v2.5", session: "old", sessionHeader: "old", purpose: null, input: 999, output: 0, cacheRead: 0, cacheWrite: 0, reasoning: 0, finish: "stop" },
+  ];
+  const sum = summarizeDay(records, day);
+  assert.equal(sum.date, day);
+  assert.equal(sum.totals.requests, 3);
+  assert.equal(sum.totals.input, 305);
+  assert.equal(sum.totals.sessions, 2);
+  assert.equal(sum.sessions.length, 2);
+  assert.equal(sum.sessions[0].session, "s1");
+  assert.equal(sum.sessions[0].sessionHeader, "s1");
+  assert.equal(sum.sessions[0].requests, 2);
+  assert.deepEqual(sum.sessions[0].models, ["mimo-v2.5"]);
+  assert.equal(sum.sessions[1].session, null);
+  assert.equal(sum.sessions[1].sessionHeader, "fb-uuid");
+  const empty = summarizeDay(records, "1999-01-01");
+  assert.equal(empty.totals.requests, 0);
+  assert.deepEqual(empty.sessions, []);
+});
+
+test("meteredStream records the sent header value", async () => {
+  const seen = [];
+  async function* chunks(list) {
+    for (const c of list) yield c;
+  }
+  for await (const c of meteredStream(
+    chunks([{ type: "finish", reason: { kind: "stop" } }]),
+    { t: 7, model: "m", session: "s9", sessionHeader: "sent-9", purpose: null },
+    (e) => seen.push(e),
+  )) void c;
+  assert.equal(seen[0].session, "s9");
+  assert.equal(seen[0].sessionHeader, "sent-9");
+});
+
+test("rpc usage/day validates date and serves groups", async () => {
+  const { ctx, calls } = stubCtx({ credentials: { resolve: async () => ({ value: "k" }) } });
+  apply(ctx, {});
+  const bad = await calls.rpc.handler("usage/day", { args: { date: "yesterday" } }, undefined);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.error.details.code, "invalid-args");
+  const missing = await calls.rpc.handler("usage/day", { args: {} }, undefined);
+  assert.equal(missing.ok, false);
+  const ok = await calls.rpc.handler("usage/day", { args: { date: "2026-09-04" } }, undefined);
+  assert.equal(ok.ok, true);
+  assert.equal(ok.value.date, "2026-09-04");
+  assert.deepEqual(ok.value.sessions, []);
 });

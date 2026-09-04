@@ -10,7 +10,7 @@
 			if (denom <= 0) return "—";
 			return Math.round((cacheRead / denom) * 100) + "%";
 		}
-		function renderStats(t, store, st, tab, setTab) {
+		function renderStats(t, store, st, tab, setTab, selectedDate, onSelectDate) {
 			var summary = st.summary;
 			var tabBtn = function (key, label) {
 				var active = tab === key;
@@ -114,10 +114,14 @@
 					return h("div", { key: "col" + ci, style: S.heatCol },
 						h("div", { key: "mlabel", style: S.heatDay }, label),
 						col.map(function (d, ri) {
+							var selected = d !== null && d.date === selectedDate;
 							return h("div", {
 								key: "c" + ci + "-" + ri,
-								style: Object.assign({}, S.heatCell, { background: HEAT_LEVELS[levelOf(d)] }),
-								title: d ? d.date + ": " + fmtTokens(d.input) + " in / " + fmtTokens(d.output) + " out" : ""
+								style: Object.assign({}, S.heatCell, { background: HEAT_LEVELS[levelOf(d)] },
+									d ? { cursor: "pointer" } : null,
+									selected ? { outline: "2px solid var(--dsw-alias-label-primary, #e8eaed)", outlineOffset: 1 } : null),
+								title: d ? d.date + ": " + fmtTokens(d.input) + " in / " + fmtTokens(d.output) + " out" : "",
+								onClick: d ? function () { onSelectDate(d.date); } : undefined
 							});
 						})
 					);
@@ -130,11 +134,51 @@
 					h("span", { key: "lm" }, t("stats.more"))
 				)
 			);
+			var detail = null;
+			if (st.dayDetail && st.dayDetail.date) {
+				var dd = st.dayDetail.data || {};
+				var dt = dd.totals || { requests: 0, input: 0, output: 0, cacheRead: 0 };
+				detail = h("div", { key: "daydetail", style: S.dayPanel },
+					h("div", { key: "ddhead", style: S.row },
+						h("span", { key: "ddate", style: S.label }, st.dayDetail.date),
+						h("span", { key: "dtotal", style: S.meta },
+							dt.requests + " " + t("stats.calls") + " · " +
+							t("stats.in") + " " + fmtTokens(dt.input) + " · " +
+							t("stats.cache") + " " + fmtTokens(dt.cacheRead) + " · " +
+							t("stats.out") + " " + fmtTokens(dt.output)),
+						h("button", {
+							key: "dclose",
+							type: "button",
+							style: S.button,
+							onClick: function () { onSelectDate(null); }
+						}, "×")
+					),
+					h("table", { key: "dtable", style: S.statTable },
+						h("thead", { key: "dhead" }, h("tr", { key: "dhr" },
+							h("th", { key: "ds", style: Object.assign({}, S.statModel, S.statHead, { textAlign: "left" }) }, t("stats.colSession")),
+							h("th", { key: "dh", style: Object.assign({}, S.statModel, S.statHead, { textAlign: "left" }) }, t("stats.colSentId")),
+							h("th", { key: "dr", style: S.statHead }, t("stats.colRequests")),
+							h("th", { key: "dio", style: S.statHead }, t("stats.colIO")),
+							h("th", { key: "dc", style: S.statHead }, t("stats.colCache"))
+						)),
+						h("tbody", { key: "dbody" }, ((dd.sessions || []).map(function (row, idx) {
+							return h("tr", { key: "ds" + idx },
+								h("td", { key: "s", style: S.mono, title: row.session || "" }, row.session || "—"),
+								h("td", { key: "h", style: S.mono, title: row.sessionHeader || "" }, row.sessionHeader || "—"),
+								h("td", { key: "r", style: S.statCell }, String(row.requests)),
+								h("td", { key: "io", style: S.statCell }, fmtTokens(row.input) + " / " + fmtTokens(row.output)),
+								h("td", { key: "c", style: S.statCell }, cacheRate(row.input, row.cacheRead))
+							);
+						})))
+					)
+				);
+			}
 			return h("div", { key: "stats", style: S.root },
 				head,
 				tabs,
 				h("div", { key: "stotals", style: S.meta }, totalsLine),
-				h("div", { key: "heatscroll", style: S.heatScroll }, grid)
+				h("div", { key: "heatscroll", style: S.heatScroll }, grid),
+				detail
 			);
 		}
 
@@ -154,6 +198,18 @@
 			var pagePair = React.useState("settings");
 			var pageTab = pagePair[0];
 			var setPageTab = pagePair[1];
+			var dayPair = React.useState(null);
+			var selectedDate = dayPair[0];
+			var setSelectedDate = dayPair[1];
+			var onSelectDate = function (date) {
+				if (date === null || date === selectedDate) {
+					setSelectedDate(null);
+					store.clearDay();
+				} else {
+					setSelectedDate(date);
+					store.fetchDay(t, date);
+				}
+			};
 			var keyConfigured = st.keyConfigured === true || (st.keyConfigured === null && props.keyConfigured === true);
 			var settings = st.settings || {};
 			var enabled = Array.isArray(settings.enabledModels) ? settings.enabledModels : null;
@@ -289,6 +345,6 @@
 			var tail = [];
 			if (st.error) tail.push(h("div", { key: "err", style: S.error }, t("error.prefix") + st.error));
 			if (st.notice) tail.push(h("div", { key: "ok", style: S.ok }, st.notice));
-			var body = pageTab === "stats" ? [renderStats(t, store, st, statsTab, setStatsTab)] : children;
+			var body = pageTab === "stats" ? [renderStats(t, store, st, statsTab, setStatsTab, selectedDate, onSelectDate)] : children;
 			return h("div", { style: S.root }, [pageTabs].concat(body).concat(tail));
 		}
