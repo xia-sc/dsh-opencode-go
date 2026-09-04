@@ -1,6 +1,8 @@
 		var zh = {
 			"nav": "OpenCode Go",
 			"section.title": "OpenCode Go 设置",
+			"page.models": "模型设置",
+			"page.stats": "统计",
 			"key.title": "API 密钥",
 			"key.configured": "已配置（存在服务端，不回显）",
 			"key.missing": "未配置",
@@ -49,6 +51,8 @@
 		var en = {
 			"nav": "OpenCode Go",
 			"section.title": "OpenCode Go settings",
+			"page.models": "Model settings",
+			"page.stats": "Statistics",
 			"key.title": "API key",
 			"key.configured": "Configured (server-side, never echoed)",
 			"key.missing": "Missing",

@@ -151,6 +151,9 @@
 			var tabPair = React.useState("overview");
 			var statsTab = tabPair[0];
 			var setStatsTab = tabPair[1];
+			var pagePair = React.useState("settings");
+			var pageTab = pagePair[0];
+			var setPageTab = pagePair[1];
 			var keyConfigured = st.keyConfigured === true || (st.keyConfigured === null && props.keyConfigured === true);
 			var settings = st.settings || {};
 			var enabled = Array.isArray(settings.enabledModels) ? settings.enabledModels : null;
@@ -269,8 +272,23 @@
 			if (settings.apiBase) {
 				children.push(h("div", { key: "endpoint", style: S.meta }, t("endpoint.note", { base: settings.apiBase })));
 			}
-			children.push(renderStats(t, store, st, statsTab, setStatsTab));
-			if (st.error) children.push(h("div", { key: "err", style: S.error }, t("error.prefix") + st.error));
-			if (st.notice) children.push(h("div", { key: "ok", style: S.ok }, st.notice));
-			return h("div", { style: S.root }, children);
+			var pageBtn = function (key, label) {
+				var active = pageTab === key;
+				return h("button", {
+					key: "pt-" + key,
+					type: "button",
+					style: active ? Object.assign({}, S.button, S.primary, S.tabActive) : S.button,
+					disabled: st.busy !== null,
+					onClick: function () { setPageTab(key); }
+				}, label);
+			};
+			var pageTabs = h("div", { key: "pagetabs", style: S.tabs },
+				pageBtn("settings", t("page.models")),
+				pageBtn("stats", t("page.stats"))
+			);
+			var tail = [];
+			if (st.error) tail.push(h("div", { key: "err", style: S.error }, t("error.prefix") + st.error));
+			if (st.notice) tail.push(h("div", { key: "ok", style: S.ok }, st.notice));
+			var body = pageTab === "stats" ? [renderStats(t, store, st, statsTab, setStatsTab)] : children;
+			return h("div", { style: S.root }, [pageTabs].concat(body).concat(tail));
 		}
