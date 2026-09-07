@@ -38,7 +38,7 @@ DeepSeek Harness 的 OpenCode Go LLM provider 插件：注册 `zen-go` 路由，
 ## 安装
 
 ```powershell
-dsh plugin --profile web add <插件目录>
+dsh plugin --profile web add xia-sc/dsh-opencode-go
 # 重启 dsh web，然后在会话模型选择器里选 zen-go/<模型>
 ```
 
