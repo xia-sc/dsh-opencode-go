@@ -1,6 +1,6 @@
 {
   "name": "@dsh-plugins/dsh-opencode-go",
-  "version": "0.8.2",
+  "version": "0.8.3",
   "description": "DeepSeek Harness LLM provider plugin for OpenCode Go: registers the zen-go route (OpenAI-compatible chat/completions) and sends x-opencode-session per conversation.",
   "type": "module",
   "main": "lib/index.js",

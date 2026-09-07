@@ -306,6 +306,32 @@ test("stream resolves the key through the seam only", async () => {
   assert.deepEqual(seen, ["OPENCODE_GO_API_KEY"]);
 });
 
+test("stream maps a non-2xx response to the provider error (regression: httpError import)", async () => {
+  const { ctx, calls } = stubCtx({ credentials: { resolve: async () => ({ value: "k" }) } });
+  apply(ctx, {});
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: false,
+    status: 401,
+    text: async () => "bad key",
+    headers: { get: () => null },
+  });
+  try {
+    await assert.rejects(
+      (async () => {
+        for await (const c of calls.adapter.adapter.stream({
+          provider: PROVIDER,
+          model: "mimo-v2.5",
+          messages: [{ id: "1", role: "user", content: [{ type: "text", text: "hi" }], source: { kind: "user" } }],
+        })) void c;
+      })(),
+      (e) => e.code === "AUTH" && /invalid API key/.test(e.message),
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("stream without any key raises MISSING_CREDENTIAL", async () => {
   const { ctx, calls } = stubCtx({ credentials: { resolve: async () => undefined } });
   apply(ctx, {});
