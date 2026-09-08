@@ -92,6 +92,12 @@ node --test test/smoke.mjs
 $env:OPENCODE_GO_API_KEY='<key>'; node --test test/smoke.mjs
 ```
 
+## 浏览器半构建
+
+`lib/client.js` 是生成物，不要手改：改 `src/client/*.js`
+（数字前缀即拼接顺序），然后跑 `npm run build:client`。
+构建脚本拼完会做语法门检查，坏了直接失败，不会把坏包写进 `lib/`。
+
 ## 已知限制
 
 - responses 系推理 effort 高时容易烧光 token 预算，大 maxTokens 起步更稳。

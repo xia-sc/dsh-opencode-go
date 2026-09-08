@@ -8,6 +8,7 @@ import fs from "node:fs";
 // so point it at a temp dir (archived-chats precedent). Must run before tests.
 process.env.DSH_HOME = fs.mkdtempSync(path.join(os.tmpdir(), "zen-go-smoke-"));
 import {
+  apiAttributionHeaders,
   CHAT_MODEL_IDS,
   Config,
   NS,
@@ -155,6 +156,11 @@ test("sse + finish mapping", () => {
   assert.equal(mapFinishReason("weird").kind, "error");
 });
 
+test("parseSseData wraps malformed lines as PROVIDER_PROTOCOL_ERROR", () => {
+  assert.throws(() => parseSseData("ping"), (e) => e.code === "PROVIDER_PROTOCOL_ERROR" && /malformed SSE/.test(e.message));
+  assert.throws(() => parseSseData("<html>502</html>"), (e) => e.code === "PROVIDER_PROTOCOL_ERROR");
+});
+
 test("usage mapping keeps disjoint counts", () => {
   // exact shape captured from the live endpoint
   const live = toTokenUsage({
@@ -209,6 +215,16 @@ test("config schema defaults + resolveOptions", async () => {
   assert.equal(resolved.apiBase, "https://opencode.ai/zen/go");
   assert.throws(() => resolveOptions({ requestTimeoutMs: -1 }), /requestTimeoutMs/);
   assert.throws(() => resolveOptions({ apiKeyEnv: "has space" }), /credential ref/);
+  assert.throws(() => resolveOptions({ apiBase: "not-a-url" }), /apiBase is not a valid URL/);
+  assert.equal(resolveOptions({ apiBase: "https://opencode.ai/zen/go///" }).apiBase, "https://opencode.ai/zen/go");
+});
+
+test("apiAttributionHeaders carries the plugin identity everywhere", () => {
+  const ua = apiAttributionHeaders()["user-agent"];
+  assert.ok(ua.includes("deepseek-harness"));
+  assert.match(ua, /dsh-opencode-go\/\d+\.\d+\.\d+/);
+  // refreshModels sends the same identity (regression: bare attributionHeaders)
+  assert.deepEqual(buildHeaders("k", "s")["user-agent"], ua);
 });
 
 function stubCtx({ credentials, providers = [] } = {}) {
@@ -241,7 +257,7 @@ test("apply registers route + configurable directory + settings section", async 
   assert.deepEqual(calls.adapter.routes, [PROVIDER]);
   assert.deepEqual(calls.configurable, [{
     provider: PROVIDER,
-    displayName: "OpenCode Go",
+    displayName: "zen-go (OpenCode Go)",
     settingsNs: NS,
     settingsPath: [],
   }]);
@@ -390,14 +406,15 @@ test("stream without any key raises MISSING_CREDENTIAL", async () => {
   );
 });
 
-// Live probe: needs OPENCODE_GO_KEY in env, otherwise skipped.
-test("live /v1/models (needs OPENCODE_GO_KEY)", async (t) => {
-  if (!process.env.OPENCODE_GO_KEY) {
+// Live probe: needs OPENCODE_GO_API_KEY in env, otherwise skipped.
+test("live /v1/models (needs OPENCODE_GO_API_KEY)", async (t) => {
+  const liveKey = process.env.OPENCODE_GO_API_KEY ?? process.env.OPENCODE_GO_KEY;
+  if (!liveKey) {
     t.skip("no key");
     return;
   }
   const r = await fetch("https://opencode.ai/zen/go/v1/models", {
-    headers: { Authorization: `Bearer ${process.env.OPENCODE_GO_KEY}` },
+    headers: { Authorization: `Bearer ${liveKey}` },
     signal: AbortSignal.timeout(30000),
   });
   assert.equal(r.status, 200);
@@ -656,6 +673,17 @@ test("pumpMessages emits text, thinking, tool use, usage, finish", async () => {
   assert.deepEqual(chunks[7].reason, { kind: "tool-calls" });
 });
 
+test("pumpChunks surfaces provider error events directly", async () => {
+  const adapter = testAdapter();
+  const events = sseStream(['data: {"type":"error","error":{"message":"overloaded"}}']);
+  await assert.rejects(
+    (async () => {
+      for await (const c of adapter.pumpChunks(events, undefined, 5000)) void c;
+    })(),
+    (e) => e.code === "PROVIDER_ERROR" && /overloaded/.test(e.message),
+  );
+});
+
 test("resolveImageData reads through attachment+fs services", async () => {
   const files = { "/copy/a.png": Buffer.from([137, 80, 78, 71]) };
   const adapter = new OpencodeGoAdapter(() => resolveOptions({}), async () => "k", {
@@ -765,6 +793,19 @@ test("meteredStream records exactly once per outcome", async () => {
   for await (const c of meteredStream(empty(), { t: 3, model: "m" }, (e) => seen3.push(e))) void c;
   assert.deepEqual(seen3[0].finish, "aborted");
   assert.equal(seen3[0].input, 0);
+  // consumer early-exit (break) still records exactly once — the `finally`
+  // path `for await ... return()` would otherwise skip silently.
+  const seen4 = [];
+  async function* infinite() {
+    yield { type: "text-delta", index: 0, text: "x" };
+    yield { type: "text-delta", index: 0, text: "y" };
+  }
+  for await (const c of meteredStream(infinite(), { t: 4, model: "m", session: "s" }, (e) => seen4.push(e))) {
+    void c;
+    break;
+  }
+  assert.equal(seen4.length, 1);
+  assert.deepEqual(seen4[0].finish, "aborted");
 });
 
 test("ledger persists, loads, summarizes and resets", async () => {
