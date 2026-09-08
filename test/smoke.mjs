@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import fs from "node:fs";
@@ -330,6 +331,48 @@ test("stream maps a non-2xx response to the provider error (regression: httpErro
   } finally {
     globalThis.fetch = realFetch;
   }
+});
+
+test("stream maps a hung connect to TIMEOUT, not a raw DOMException", async () => {
+  const { ctx, calls } = stubCtx({ credentials: { resolve: async () => ({ value: "k" }) } });
+  apply(ctx, {});
+  const realFetch = globalThis.fetch;
+  // Never responds: the request-phase timer (requestTimeoutMs) must fire and
+  // the adapter must surface it as a TIMEOUT LlmError.
+  globalThis.fetch = (_url, init) => new Promise((_resolve, reject) => {
+    init.signal?.addEventListener("abort", () => reject(init.signal.reason ?? new DOMException("aborted", "AbortError")));
+  });
+  // The request timer is unref'd (it must not hold the process open), so keep
+  // the loop alive explicitly until the stubbed fetch settles.
+  const keepAlive = setInterval(() => {}, 1000);
+  try {
+    // Shrink the connect budget so the test does not wait the full 60s.
+    calls.adapter.adapter.getOptions = () => ({ ...resolveOptions({}), requestTimeoutMs: 50, streamIdleTimeoutMs: 300000 });
+    await assert.rejects(
+      (async () => {
+        for await (const c of calls.adapter.adapter.stream({
+          provider: PROVIDER,
+          model: "mimo-v2.5",
+          messages: [{ id: "1", role: "user", content: [{ type: "text", text: "hi" }], source: { kind: "user" } }],
+        })) void c;
+      })(),
+      (e) => e.code === "TIMEOUT" && /timed out/.test(e.message),
+    );
+  } finally {
+    clearInterval(keepAlive);
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("meteredStream records DOMException aborts by name, not numeric code", async () => {
+  const seen = [];
+  async function* failGen() {
+    throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+  }
+  await assert.rejects((async () => {
+    for await (const c of meteredStream(failGen(), { t: 4, model: "m" }, (e) => seen.push(e))) void c;
+  })(), /aborted due to timeout/);
+  assert.equal(seen[0].finish, "error:TimeoutError");
 });
 
 test("stream without any key raises MISSING_CREDENTIAL", async () => {
@@ -836,4 +879,23 @@ test("rpc usage/day validates date and serves groups", async () => {
   assert.equal(ok.ok, true);
   assert.equal(ok.value.date, "2026-09-04");
   assert.deepEqual(ok.value.sessions, []);
+});
+
+test("setup-local-deps normalizeCandidate accepts host layouts", () => {
+  const require = createRequire(import.meta.url);
+  const { normalizeCandidate } = require("../scripts/setup-local-deps.cjs");
+  // The real host tree on this machine: nested under @deepseek-ai/dsh.
+  const real = "D:/software/nodejs/node_modules/@deepseek-ai/dsh/node_modules";
+  assert.equal(
+    normalizeCandidate("D:/software/nodejs/node_modules/@deepseek-ai/dsh"),
+    path.resolve(real),
+  );
+  assert.equal(normalizeCandidate(real), path.resolve(real));
+  // A bare scope dir resolves through the nested dsh tree when present.
+  assert.equal(
+    normalizeCandidate("D:/software/nodejs/node_modules/@deepseek-ai"),
+    path.resolve(real),
+  );
+  // Unknown dirs yield null instead of a bogus bridge target.
+  assert.equal(normalizeCandidate(os.tmpdir()), null);
 });

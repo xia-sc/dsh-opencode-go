@@ -42,6 +42,24 @@ dsh plugin --profile web add github xia-sc/dsh-opencode-go
 # 重启 dsh web，然后在会话模型选择器里选 zen-go/<模型>
 ```
 
+本地源码安装（`dsh plugin add <目录>`，pnpm `link:` 方式）
+多一步——否则启动直接崩（见 [#2](https://github.com/xia-sc/dsh-opencode-go/issues/2)）：
+
+```powershell
+cd <插件源码目录>
+node scripts/setup-local-deps.cjs   # 自动定位宿主依赖树，建 node_modules/@deepseek-ai 桥
+dsh plugin --profile web add <插件源码目录>
+# 重启 dsh web
+```
+
+原理一句话：`link:` 安装只是在 profile 里建个 junction 指回源码目录，
+Node 按**真实路径**向上找 `@deepseek-ai/*` peer 包——源码盘里没有，只能
+桥到宿主那份。`--host <目录>` 可显式指定宿主依赖树（install root /
+`node_modules` / `@deepseek-ai` 本级都认），`--dry-run` 只探测不建链。
+建桥失败（比如启动报 `Cannot find package '@deepseek-ai/xxx'`）就检查桥
+还在不在：`node_modules/@deepseek-ai` 必须是 junction，不在就重跑脚本。
+registry / github 安装不受影响，不用跑这步。
+
 存 key（任选其一，存完即生效，不用重启）：
 
 ```yaml
@@ -59,7 +77,7 @@ refs:
 | --- | --- | --- |
 | `apiKeyEnv` | `OPENCODE_GO_API_KEY` | credential ref 名 |
 | `apiBase` | `https://opencode.ai/zen/go` | 去掉尾部 `/v1` 前缀后的基址 |
-| `requestTimeoutMs` / `streamIdleTimeoutMs` | `60000` / `300000` | 连接超时 / 流空闲看门狗 |
+| `requestTimeoutMs` / `streamIdleTimeoutMs` | `60000` / `300000` | 建连+首包超时（响应头一到即停表，长流不受总时长限制） / 流空闲看门狗 |
 | `enabledModels` | 全表 | 提供哪些模型（卡片勾选即改这里） |
 | `modelCaps` | `[]` | `[{id, contextWindow?, maxTokens?}]`，自填容量覆盖 |
 

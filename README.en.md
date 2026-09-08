@@ -59,6 +59,26 @@ dsh plugin --profile web add <plugin-directory>
 # restart dsh web, then pick zen-go/<model> in the session model picker
 ```
 
+Local-source installs (`dsh plugin add <dir>`, the pnpm `link:` route) need
+one extra step first — otherwise boot crashes outright (see
+[#2](https://github.com/xia-sc/dsh-opencode-go/issues/2)):
+
+```powershell
+cd <plugin-source-dir>
+node scripts/setup-local-deps.cjs   # locate the host tree, bridge node_modules/@deepseek-ai
+dsh plugin --profile web add <plugin-source-dir>
+# restart dsh web
+```
+
+Why: a `link:` install is just a junction back at the source tree, so Node
+resolves the host half's `@deepseek-ai/*` peer imports upward from the REAL
+source path, where no `@deepseek-ai/*` exists. `--host <dir>` pins the host
+tree explicitly (install root, `node_modules`, or the `@deepseek-ai` dir
+itself); `--dry-run` only probes. If boot ever complains
+`Cannot find package '@deepseek-ai/xxx'`, check the bridge is still a
+junction and re-run the script. Registry/github installs are unaffected —
+skip this step.
+
 Store the key (any one of these; effective immediately, no restart):
 
 ```yaml
@@ -77,7 +97,7 @@ settings card.
 | --- | --- | --- |
 | `apiKeyEnv` | `OPENCODE_GO_API_KEY` | credential ref name |
 | `apiBase` | `https://opencode.ai/zen/go` | base URL without the trailing `/v1` prefix |
-| `requestTimeoutMs` / `streamIdleTimeoutMs` | `60000` / `300000` | connect timeout / stream idle watchdog |
+| `requestTimeoutMs` / `streamIdleTimeoutMs` | `60000` / `300000` | connect + first-byte timeout (timer stops at response headers; long streams aren't capped by total time) / stream idle watchdog |
 | `enabledModels` | whole table | which models are offered (the card checkboxes edit this) |
 | `modelCaps` | `[]` | `[{id, contextWindow?, maxTokens?}]`, user-filled capacity overrides |
 
