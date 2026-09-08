@@ -14,6 +14,7 @@
     "src",
     "scripts",
     "cordis.patch.yml",
+    "LICENSE",
     "README.md",
     "README.en.md"
   ],
