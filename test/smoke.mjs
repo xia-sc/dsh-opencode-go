@@ -428,6 +428,10 @@ test("listModels honors enabledModels", async () => {
 test("reasoning levels are declared per surface and wired to bodies", async () => {
   assert.deepEqual(reasoningFor("muse-spark-1.3-contributor").efforts.map((e) => e.id), ["minimal", "low", "medium", "high", "xhigh"]);
   assert.deepEqual(reasoningFor("mimo-v2.5").efforts.map((e) => e.id), ["low", "medium", "high"]);
+  // PR #1: deepseek-v4 chat models carry a per-model max tier.
+  assert.deepEqual(reasoningFor("deepseek-v4-flash").efforts.map((e) => e.id), ["low", "medium", "high", "max"]);
+  assert.deepEqual(reasoningFor("deepseek-v4-pro").efforts.map((e) => e.id), ["low", "medium", "high", "max"]);
+  assert.deepEqual(reasoningFor("deepseek-v4-flash-vision-exp").efforts.map((e) => e.id), ["low", "medium", "high", "max"]);
   assert.equal(reasoningFor("qwen3.8-max"), undefined);
   assert.equal(reasoningFor("unknown-model"), undefined);
   // ids are unique, non-empty, display-cased
@@ -448,6 +452,7 @@ test("reasoning levels are declared per surface and wired to bodies", async () =
   assert.deepEqual(buildResponsesBody({ ...base, reasoningEffort: "xhigh" }).reasoning, { effort: "xhigh" });
   assert.equal(buildResponsesBody(base).reasoning, undefined);
   assert.equal(buildChatBody({ ...base, reasoningEffort: "high" }).reasoning_effort, "high");
+  assert.equal(buildChatBody({ ...base, reasoningEffort: "max" }).reasoning_effort, "max");
   assert.equal(buildChatBody(base).reasoning_effort, undefined);
   assert.throws(() => buildAnthropicBody({ ...base, reasoningEffort: "high" }), /budget-based/);
   assert.ok(buildAnthropicBody(base));

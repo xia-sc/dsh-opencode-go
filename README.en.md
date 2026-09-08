@@ -26,9 +26,13 @@ header on every outbound inference request.
   per-model context/max-output inputs, credential status dot).
 - **Reasoning levels**: responses models offer Minimal/Low/Medium/High/Xhigh
   (wired to `reasoning.effort`); chat models offer Low/Medium/High
-  (`reasoning_effort` passthrough); messages models offer none (Anthropic
-  thinking is budget-based — explicit values are rejected). No defaults are
-  declared: Default omits the field (the server decides).
+  (`reasoning_effort` passthrough; deepseek-v4-flash/pro/flash-vision-exp
+  additionally offer Max — verified live against the upstream gateway, thanks
+  to [@34262315716](https://github.com/34262315716), see
+  [#1](https://github.com/xia-sc/dsh-opencode-go/pull/1)); messages models
+  offer none (Anthropic thinking is budget-based — explicit values are
+  rejected). No defaults are declared: Default omits the field (the server
+  decides).
 - **Multimodal**: vision models (`deepseek-v4-flash-vision-exp`, both
   `muse-spark-*-contributor`) declare `["text", "image"]` so the runtime passes
   images through; other known models are text-only (the runtime substitutes
@@ -118,3 +122,12 @@ $env:OPENCODE_GO_API_KEY='<key>'; node --test test/smoke.mjs
   the operator adds them.
 - Pricing lives in the metering plugin's own price tables; this plugin only
   guarantees correct usage reporting.
+
+## Acknowledgements
+
+- [@34262315716](https://github.com/34262315716) (Critical Natural): verified
+  live that the upstream gateway accepts `reasoning_effort=max` and
+  contributed the Max tier for the three deepseek-v4 models
+  ([#1](https://github.com/xia-sc/dsh-opencode-go/pull/1)); root-caused the
+  local-source link-install boot crash
+  ([#2](https://github.com/xia-sc/dsh-opencode-go/issues/2)).

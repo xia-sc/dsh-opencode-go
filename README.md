@@ -17,7 +17,10 @@ DeepSeek Harness 的 OpenCode Go LLM provider 插件：注册 `zen-go` 路由，
 - **设置卡**：Models 页行 + 设置侧边栏独立入口（key 录入/清除、模型勾选与全选、
   刷新实时目录、每模型自填上下文与输出上限、密钥状态点）。
 - **推理档位**：responses 系 Minimal/Low/Medium/High/Xhigh（落 `reasoning.effort`），chat 系
-  Low/Medium/High（`reasoning_effort` 透传），messages 系无档位词汇（显式传会报错）。
+  Low/Medium/High（`reasoning_effort` 透传；deepseek-v4-flash/pro/flash-vision-exp
+  另有 Max 档——上游网关实测支持，感谢 [@34262315716](https://github.com/34262315716)
+  真机验证并贡献，见 [#1](https://github.com/xia-sc/dsh-opencode-go/pull/1)），messages 系
+  无档位词汇（显式传会报错）。
   均不设默认值，Default 即不发字段。
 - **多模态**：vision 模型（`deepseek-v4-flash-vision-exp`、两个 muse-spark）声明
   `["text","image"]`，图片经 attachment 服务读盘转 base64 内联
@@ -95,3 +98,10 @@ $env:OPENCODE_GO_API_KEY='<key>'; node --test test/smoke.mjs
 - 官方 `/v1/models` 不返回上下文窗口，`modelCaps` 目前靠手填；
   官方补了字段即插即用。
 - 价格由计费插件自己的价格表定，本插件只保证用量上报正确。
+
+## 致谢
+
+- [@34262315716](https://github.com/34262315716)（Critical Natural）：真机验证上游网关
+  支持 `reasoning_effort=max`，并贡献 deepseek-v4 三模型的 Max 档
+  （[#1](https://github.com/xia-sc/dsh-opencode-go/pull/1)）；本地源码 link 安装
+  启动崩溃的根因分析（[#2](https://github.com/xia-sc/dsh-opencode-go/issues/2)）。
