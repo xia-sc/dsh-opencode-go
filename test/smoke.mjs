@@ -231,13 +231,31 @@ function stubCtx({ credentials, providers = [] } = {}) {
   const calls = { configurable: null, adapter: null, section: null, rpc: null };
   const ctx = {
     get: (name) => (name === "credentials" ? credentials : undefined),
-    logger: { error: () => {} },
+    logger: { error: () => {}, warn: () => {}, info: () => {}, debug: () => {} },
     inject: (deps, cb) => {
       // Mirrors the real installSection: setSource + synchronous onChange.
       // An apply that omits onChange dies here, exactly like in production.
       // setSource carries the merged value: base (composition entry) wins
       // when the user section is empty, like the real resolve().
       if (deps.includes("settings")) cb({ settings: { installSection: (...args) => { calls.section = args; const hooks = args[4]; hooks.setSource(() => args[3]); hooks.onChange(); } } });
+      // The RPC channel registers a PHYSICAL webServer prefix route from the
+      // nested ["connection", "webServer"] fiber (connection.rpc.handle is
+      // deliberately NOT used — it resolves owner.webServer on the connection
+      // service's own ctx and dies with "cannot get property webServer
+      // without inject", silently never mounting). Mirror that: the callback
+      // receives a fiber ctx with effect() and a webServer.register.
+      if (deps.includes("connection")) cb({
+        // Mirror Cordis: effect() executes its setup synchronously and keeps
+        // the disposer; the setup registers the webServer prefix route below.
+        effect: (setup) => {
+          calls.rpc = { effect: setup };
+          const dispose = setup();
+          if (typeof dispose === "function") calls.rpc.dispose = dispose;
+          return dispose;
+        },
+        webServer: { register: (route) => { calls.rpc = { route, handler: route.handler, dispatch: route.dispatch, registered: true }; return () => {}; } },
+        connection: { requestRejection: () => void 0 },
+      });
     },
     connection: {
       rpc: { handle: (channel, handler, opts) => { calls.rpc = { channel, handler, opts }; } },
@@ -251,6 +269,27 @@ function stubCtx({ credentials, providers = [] } = {}) {
   return { ctx, calls };
 }
 
+/** Drive a node-style route handler with a minimal req/res pair. */
+async function driveRoute(handler, { method = "POST", url = "/zen-go-rpc/usage/summary", headers = {}, body = "" } = {}) {
+  const req = {
+    method,
+    url,
+    headers: { "content-type": "application/json", ...headers },
+    [Symbol.asyncIterator]: async function* () { if (body !== "") yield Buffer.from(body); },
+  };
+  let status = 0;
+  let headersSent = {};
+  let payload = "";
+  const res = {
+    writeHead: (code, h = {}) => { status = code; headersSent = h; },
+    write: (chunk) => { payload += Buffer.from(chunk).toString("utf8"); return true; },
+    end: (chunk) => { if (chunk !== undefined) payload += Buffer.from(chunk).toString("utf8"); },
+    destroy: () => {},
+  };
+  await handler(req, res);
+  return { status, headersSent, body: payload };
+}
+
 test("apply registers route + configurable directory + settings section", async () => {
   const { ctx, calls } = stubCtx({ credentials: { resolve: async () => ({ value: "k", source: "file" }) } });
   apply(ctx, {});
@@ -262,7 +301,23 @@ test("apply registers route + configurable directory + settings section", async 
     settingsPath: [],
   }]);
   assert.equal(calls.section[1], NS);
-  assert.equal(calls.rpc.channel, "/zen-go-rpc");
+  assert.ok(calls.rpc.route, "webServer prefix route registered");
+  assert.equal(calls.rpc.route.kind, "prefix");
+  assert.equal(calls.rpc.route.path, "/zen-go-rpc");
+  // The channel must NOT ride connection.rpc.handle (it silently fails to
+  // mount in production); the physical route is what the browser hits.
+  assert.ok(!("channel" in calls.rpc.route), "route is a webServer route, not a rpc.handle entry");
+  // Drive the route's node handler end-to-end (buffered bridge included).
+  const rpcCall = await driveRoute(calls.rpc.handler, {
+    url: "/zen-go-rpc/usage/summary",
+    body: JSON.stringify({ type: "client-request", rpcId: "probe-1", method: "usage/summary", payload: { args: {} } }),
+  });
+  assert.equal(rpcCall.status, 200);
+  const envelope = JSON.parse(rpcCall.body);
+  assert.equal(envelope.type, "server-response");
+  assert.equal(envelope.rpcId, "probe-1");
+  assert.equal(envelope.result.ok, true);
+  assert.equal(envelope.result.value.totals.requests, 0);
   const models = await calls.adapter.adapter.listModels(PROVIDER);
   assert.ok(models.length > 10 && models.every((m) => m.provider === PROVIDER));
   const resolved = await calls.adapter.adapter.resolveModel(PROVIDER, "mimo-v2.5");
@@ -485,7 +540,7 @@ test("rpc models/refresh returns classified ids", async () => {
     json: async () => ({ data: [{ id: "mimo-v2.5" }, { id: "muse-spark-1.3-contributor" }, { id: "brand-new-thing" }, { id: "" }] }),
   });
   try {
-    const res = await calls.rpc.handler("models/refresh", { args: {} }, undefined);
+    const res = await calls.rpc.dispatch({ type: "client-request", rpcId: "m1", method: "models/refresh", payload: { args: {} } }, undefined);
     assert.equal(res.ok, true);
     assert.deepEqual(res.value.models, [
       { id: "mimo-v2.5", surface: "chat", input: ["text"] },
@@ -500,10 +555,10 @@ test("rpc models/refresh returns classified ids", async () => {
 test("rpc models/refresh without key fails cleanly", async () => {
   const { ctx, calls } = stubCtx({ credentials: { resolve: async () => undefined } });
   apply(ctx, {});
-  const res = await calls.rpc.handler("models/refresh", { args: {} }, undefined);
+  const res = await calls.rpc.dispatch({ type: "client-request", rpcId: "m2", method: "models/refresh", payload: { args: {} } }, undefined);
   assert.equal(res.ok, false);
   assert.equal(res.error.details.code, "missing-credential");
-  const unknown = await calls.rpc.handler("nope", { args: {} }, undefined);
+  const unknown = await calls.rpc.dispatch({ type: "client-request", rpcId: "m3", method: "nope", payload: { args: {} } }, undefined);
   assert.equal(unknown.ok, false);
   assert.equal(unknown.error.details.code, "unknown-endpoint");
 });
@@ -865,12 +920,24 @@ test("dayKey buckets local days and pluginDataDir respects DSH_HOME", () => {
 test("rpc usage endpoints serve the ledger", async () => {
   const { ctx, calls } = stubCtx({ credentials: { resolve: async () => ({ value: "k" }) } });
   apply(ctx, {});
-  const empty = await calls.rpc.handler("usage/summary", { args: {} }, undefined);
-  assert.equal(empty.ok, true);
-  assert.equal(empty.value.totals.requests, 0);
-  const reset = await calls.rpc.handler("usage/reset", { args: {} }, undefined);
-  assert.equal(reset.ok, true);
-  assert.match(reset.value.archived, /\.bak\.jsonl$/);
+  const empty = await driveRoute(calls.rpc.handler, {
+    url: "/zen-go-rpc/usage/summary",
+    body: JSON.stringify({ type: "client-request", rpcId: "s1", method: "usage/summary", payload: { args: {} } }),
+  });
+  assert.equal(empty.status, 200);
+  const summaryEnvelope = JSON.parse(empty.body);
+  assert.equal(summaryEnvelope.rpcId, "s1");
+  assert.equal(summaryEnvelope.result.ok, true);
+  assert.equal(summaryEnvelope.result.value.totals.requests, 0);
+  const reset = await driveRoute(calls.rpc.handler, {
+    url: "/zen-go-rpc/usage/reset",
+    body: JSON.stringify({ type: "client-request", rpcId: "s2", method: "usage/reset", payload: { args: {} } }),
+  });
+  assert.equal(reset.status, 200);
+  const resetEnvelope = JSON.parse(reset.body);
+  assert.equal(resetEnvelope.rpcId, "s2");
+  assert.equal(resetEnvelope.result.ok, true);
+  assert.match(resetEnvelope.result.value.archived, /\.bak\.jsonl$/);
 });
 
 test("summarizeDay groups by session with sent headers", () => {
@@ -916,15 +983,27 @@ test("meteredStream records the sent header value", async () => {
 test("rpc usage/day validates date and serves groups", async () => {
   const { ctx, calls } = stubCtx({ credentials: { resolve: async () => ({ value: "k" }) } });
   apply(ctx, {});
-  const bad = await calls.rpc.handler("usage/day", { args: { date: "yesterday" } }, undefined);
-  assert.equal(bad.ok, false);
-  assert.equal(bad.error.details.code, "invalid-args");
-  const missing = await calls.rpc.handler("usage/day", { args: {} }, undefined);
-  assert.equal(missing.ok, false);
-  const ok = await calls.rpc.handler("usage/day", { args: { date: "2026-09-04" } }, undefined);
-  assert.equal(ok.ok, true);
-  assert.equal(ok.value.date, "2026-09-04");
-  assert.deepEqual(ok.value.sessions, []);
+  const bad = await driveRoute(calls.rpc.handler, {
+    url: "/zen-go-rpc/usage/day",
+    body: JSON.stringify({ type: "client-request", rpcId: "d1", method: "usage/day", payload: { args: { date: "yesterday" } } }),
+  });
+  const badEnvelope = JSON.parse(bad.body);
+  assert.equal(bad.status, 200);
+  assert.equal(badEnvelope.result.ok, false);
+  assert.equal(badEnvelope.result.error.details.code, "invalid-args");
+  const missing = await driveRoute(calls.rpc.handler, {
+    url: "/zen-go-rpc/usage/day",
+    body: JSON.stringify({ type: "client-request", rpcId: "d2", method: "usage/day", payload: { args: {} } }),
+  });
+  assert.equal(JSON.parse(missing.body).result.ok, false);
+  const ok = await driveRoute(calls.rpc.handler, {
+    url: "/zen-go-rpc/usage/day",
+    body: JSON.stringify({ type: "client-request", rpcId: "d3", method: "usage/day", payload: { args: { date: "2026-09-04" } } }),
+  });
+  const okEnvelope = JSON.parse(ok.body);
+  assert.equal(okEnvelope.result.ok, true);
+  assert.equal(okEnvelope.result.value.date, "2026-09-04");
+  assert.deepEqual(okEnvelope.result.value.sessions, []);
 });
 
 test("setup-local-deps normalizeCandidate accepts host layouts", () => {
