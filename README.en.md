@@ -6,6 +6,9 @@ An LLM provider plugin for DeepSeek Harness that serves OpenCode Go: it register
 the `zen-go` route and sends a stable per-conversation `x-opencode-session`
 header on every outbound inference request.
 
+> **Runtime**: adapted to DeepSeek Harness `0.1.5-rc.1` (peer dependencies
+> `@deepseek-ai/dsh-*` declared as `^0.1.5-rc.1`).
+
 - **All three surfaces**: `chat/completions` (mimo / deepseek-v4 / glm / kimi /
   longcat / hy), `responses` (grok / gpt-5.6-luna / muse-spark, including the
   standalone `response.incomplete` terminal state), and `messages`

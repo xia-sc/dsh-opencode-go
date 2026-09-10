@@ -1,6 +1,6 @@
 {
   "name": "@dsh-plugins/dsh-opencode-go",
-  "version": "0.8.7-rc.1",
+  "version": "0.8.8",
   "description": "DeepSeek Harness LLM provider plugin for OpenCode Go: registers the zen-go route (OpenAI-compatible chat/completions) and sends x-opencode-session per conversation.",
   "type": "module",
   "main": "lib/index.js",
@@ -38,11 +38,11 @@
     }
   },
   "peerDependencies": {
-    "@deepseek-ai/dsh-credentials": "^0.1.2-rc.1",
-    "@deepseek-ai/dsh-launch-environment": "^0.1.2-rc.1",
-    "@deepseek-ai/dsh-llm": "^0.1.2-rc.1",
-    "@deepseek-ai/dsh-settings": "^0.1.2-rc.1",
-    "@deepseek-ai/dsh-timeout": "^0.1.2-rc.1",
+    "@deepseek-ai/dsh-credentials": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-launch-environment": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-settings": "^0.1.5-rc.1",
+    "@deepseek-ai/dsh-timeout": "^0.1.5-rc.1",
     "@deepseek-ai/schemastery": "^3.18.2"
   },
   "engines": {

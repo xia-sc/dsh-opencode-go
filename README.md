@@ -5,6 +5,9 @@
 DeepSeek Harness 的 OpenCode Go LLM provider 插件：注册 `zen-go` 路由，
 每次出站推理请求都携带每会话稳定的 `x-opencode-session`。
 
+> **运行环境**：适配 DeepSeek Harness `0.1.5-rc.1`（peer 依赖
+> `@deepseek-ai/dsh-*` 声明为 `^0.1.5-rc.1`）。
+
 - **三端面全接**：`chat/completions`（mimo / deepseek-v4 / glm / kimi / longcat / hy）、
   `responses`（grok / gpt-5.6-luna / muse-spark，含独立 `response.incomplete` 终态）、
   `messages`（Anthropic 兼容：minimax / qwen，用 `x-api-key` 鉴权，`max_tokens` 缺省 8192）。
