@@ -211,6 +211,22 @@ test("config schema defaults + resolveOptions", async () => {
   const withCaps = await Config["~standard"].validate({ modelCaps: [{ id: "mimo-v2.5", contextWindow: 100 }] });
   assert.equal(withCaps.issues, undefined);
   assert.deepEqual(withCaps.value.modelCaps, [{ id: "mimo-v2.5", contextWindow: 100 }]);
+  // Capability fields survive the real settings path (Config -> resolveOptions).
+  const withCaps2 = await Config["~standard"].validate({
+    modelCaps: [{ id: "deepseek-flash", surface: "responses", image: false, efforts: ["low", "high"] }],
+  });
+  assert.equal(withCaps2.issues, undefined);
+  assert.deepEqual(withCaps2.value.modelCaps, [
+    { id: "deepseek-flash", surface: "responses", image: false, efforts: ["low", "high"] },
+  ]);
+  // `efforts` must stay absent when unset: schemastery would otherwise
+  // materialize [] and every entry naming another field would silently mean
+  // "no reasoning levels", dropping the static table's vocabulary.
+  const omitted = await Config["~standard"].validate({ modelCaps: [{ id: "deepseek-flash", contextWindow: 8 }] });
+  assert.deepEqual(omitted.value.modelCaps, [{ id: "deepseek-flash", contextWindow: 8 }]);
+  assert.equal("efforts" in omitted.value.modelCaps[0], false);
+  assert.equal(reasoningFor("deepseek-flash", omitted.value.modelCaps[0]), undefined);
+  assert.equal(reasoningFor("mimo-v2.5", omitted.value.modelCaps[0]).efforts.length, 3);
   const resolved = resolveOptions({});
   assert.equal(String(resolved.apiKeyEnv), "OPENCODE_GO_API_KEY");
   assert.equal(resolved.apiBase, "https://opencode.ai/zen/go");
