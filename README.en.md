@@ -26,7 +26,8 @@ header on every outbound inference request.
   There is no plaintext key field anywhere.
 - **Settings card**: a Models-page row plus a standalone Settings sidebar entry
   (key save/clear, model checklist with select-all, live catalog refresh,
-  per-model context/max-output inputs, credential status dot).
+  per-model context / max-output / surface / reasoning-levels / modality inputs,
+  credential status dot).
 - **Reasoning levels**: responses models offer Minimal/Low/Medium/High/Xhigh
   (wired to `reasoning.effort`); chat models offer Low/Medium/High
   (`reasoning_effort` passthrough; deepseek-v4-flash/pro/flash-vision-exp
@@ -42,6 +43,19 @@ header on every outbound inference request.
   placeholders); unknown ids stay permissive and the server decides. Images
   resolve from the durable attachment store to inline base64 data URLs per
   surface (png/jpeg/webp/gif, 20 MB cap per image).
+- **Unclassified models can be described by hand**: the operator's `/v1/models`
+  discloses ids only, so a newly served model (say `deepseek-flash`) is
+  classified `unknown` — which is why neither a reasoning level nor a modality
+  can be set for it
+  ([#4](https://github.com/xia-sc/dsh-opencode-go/issues/4)). The settings card
+  now lets you state, per model, its **surface** (chat / responses / messages),
+  its **reasoning levels** and its **modality**; leaving a control on `default`
+  follows the built-in table. The surface decides both routing and the level
+  vocabulary — chat sends `reasoning_effort`, responses sends `reasoning.effort`,
+  messages has no level vocabulary — so the level options follow the surface you
+  pick. A hand-declared `image` rewrites the declaration *and* the image-admission
+  check, so a table-known text-only id is not rejected after you declare it
+  multimodal.
 - **Content-block policy**: a user message carries user payload (`text`/`image`)
   only; every other block — harness annotations such as `reasoning` and
   `tool-call`, plus merge-extensible additions — is dropped rather than

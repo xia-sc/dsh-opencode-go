@@ -20,6 +20,7 @@ import {
   buildChatBody,
   buildHeaders,
   buildResponsesBody,
+  capabilitiesOf,
   collectImageRefs,
   createUsageLedger,
   dayKey,
@@ -528,6 +529,130 @@ test("reasoning levels are declared per surface and wired to bodies", async () =
   assert.equal(buildChatBody(base).reasoning_effort, undefined);
   assert.throws(() => buildAnthropicBody({ ...base, reasoningEffort: "high" }), /budget-based/);
   assert.ok(buildAnthropicBody(base));
+});
+
+test("per-model capability overrides classify an unknown id (issue #4)", async () => {
+  // Nothing declared: the conservative defaults are unchanged, and an id the
+  // table cannot classify still offers no levels (issue #4's report).
+  assert.deepEqual(capabilitiesOf("deepseek-flash"), { surface: "chat", image: undefined, efforts: [] });
+  assert.equal(reasoningFor("deepseek-flash"), undefined);
+  assert.deepEqual(capabilitiesOf("mimo-v2.5"), { surface: "chat", image: false, efforts: ["low", "medium", "high"] });
+  assert.deepEqual(capabilitiesOf("deepseek-v4-flash").efforts, ["low", "medium", "high", "max"]);
+  assert.deepEqual(capabilitiesOf("qwen3.8-max"), { surface: "messages", image: false, efforts: [] });
+
+  // Stating the surface states its vocabulary, so the picker works.
+  const asResponses = { id: "deepseek-flash", surface: "responses" };
+  assert.deepEqual(capabilitiesOf("deepseek-flash", asResponses), {
+    surface: "responses",
+    image: undefined,
+    efforts: ["minimal", "low", "medium", "high", "xhigh"],
+  });
+  assert.deepEqual(reasoningFor("deepseek-flash", asResponses).efforts.map((e) => e.id), ["minimal", "low", "medium", "high", "xhigh"]);
+  assert.deepEqual(capabilitiesOf("deepseek-flash", { id: "deepseek-flash", surface: "messages" }).efforts, []);
+
+  // Stating levels states exactly those; an empty list is a statement too.
+  assert.deepEqual(capabilitiesOf("deepseek-flash", { id: "deepseek-flash", efforts: ["low", "high"] }).efforts, ["low", "high"]);
+  assert.equal(reasoningFor("deepseek-flash", { id: "deepseek-flash", efforts: [] }), undefined);
+  assert.deepEqual(reasoningFor("mimo-v2.5", { id: "mimo-v2.5", efforts: ["low", "medium", "high", "max"] }).efforts.map((e) => e.id), ["low", "medium", "high", "max"]);
+
+  // Modality is declarable in both directions and beats the static table.
+  assert.equal(modelSupportsImage("deepseek-flash", { id: "deepseek-flash", image: true }), true);
+  assert.equal(modelSupportsImage("deepseek-flash", { id: "deepseek-flash", image: false }), false);
+  assert.equal(modelSupportsImage("mimo-v2.5", { id: "mimo-v2.5", image: true }), true);
+  assert.equal(modelSupportsImage("deepseek-v4-flash-vision-exp", { id: "deepseek-v4-flash-vision-exp", image: false }), false);
+
+  // Validation rejects what the wire cannot carry.
+  assert.throws(() => resolveOptions({ modelCaps: [{ id: "x", surface: "grpc" }] }), /surface must be one of/);
+  assert.throws(() => resolveOptions({ modelCaps: [{ id: "x", surface: "chat", efforts: ["xhigh"] }] }), /not a chat-surface reasoning level/);
+  assert.throws(() => resolveOptions({ modelCaps: [{ id: "qwen3.8-max", efforts: ["low"] }] }), /no level vocabulary/);
+  assert.throws(() => resolveOptions({ modelCaps: [{ id: "x", image: "yes" }] }), /image must be a boolean/);
+  assert.deepEqual(
+    resolveOptions({ modelCaps: [{ id: "x", image: false, efforts: [] }] }).modelCaps,
+    [{ id: "x", image: false, efforts: [] }],
+  );
+  // Duplicates would be rejected by the host as invalid metadata.
+  assert.deepEqual(resolveOptions({ modelCaps: [{ id: "x", efforts: ["low", "low"] }] }).modelCaps, [{ id: "x", efforts: ["low"] }]);
+
+  // The catalog and the request path report the same declared capability.
+  const { ctx, calls } = stubCtx({ credentials: { resolve: async () => ({ value: "k" }) } });
+  apply(ctx, {
+    enabledModels: ["deepseek-flash"],
+    modelCaps: [{ id: "deepseek-flash", surface: "responses", image: true, efforts: ["medium", "high"] }],
+  });
+  const adapter = calls.adapter.adapter;
+  assert.deepEqual(await adapter.listModels(PROVIDER), [{
+    provider: PROVIDER,
+    id: "deepseek-flash",
+    name: "deepseek-flash",
+    inputModalities: ["text", "image"],
+    reasoning: { efforts: [{ id: "medium", name: "Medium" }, { id: "high", name: "High" }] },
+  }]);
+  const resolved = await adapter.resolveModel(PROVIDER, "deepseek-flash");
+  assert.deepEqual(resolved.inputModalities, ["text", "image"]);
+  assert.deepEqual(resolved.reasoning.efforts.map((e) => e.id), ["medium", "high"]);
+
+  // A declared image on a table-text-only id must not fail the image guard —
+  // the runtime passes that image through on the strength of the same flag.
+  const images = new Map([["a", { mediaType: "image/png", base64: "iVBOR" }]]);
+  const imgMsg = {
+    id: "1", role: "user",
+    content: [{ type: "image", attachment: { attachmentId: "a", mediaType: "image/png" } }],
+    source: { kind: "user" },
+  };
+  assert.throws(() => buildChatBody({ model: "mimo-v2.5", messages: [imgMsg] }, images), /does not accept image input/);
+  assert.ok(buildChatBody({ model: "mimo-v2.5", messages: [imgMsg] }, images, { id: "mimo-v2.5", image: true }));
+  // Undeclared modality on an unknown id stays exactly as before: no claim in
+  // the metadata (absent means "unknown" to the runtime, which stays
+  // permissive) and no level vocabulary either.
+  const undeclared = await adapter.resolveModel(PROVIDER, "brand-new-thing");
+  assert.equal(undeclared.inputModalities, undefined);
+  assert.equal(undeclared.reasoning, undefined);
+  assert.equal(modelSupportsImage("brand-new-thing"), true);
+
+  // The refresh classification reflects the override instead of "unknown".
+  const refreshed = stubCtx({ credentials: { resolve: async () => ({ value: "k" }) } });
+  apply(refreshed.ctx, { modelCaps: [{ id: "brand-new-thing", surface: "responses", image: true }] });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    status: 200,
+    json: async () => ({ data: [{ id: "brand-new-thing" }, { id: "mimo-v2.5" }] }),
+  });
+  try {
+    const res = await refreshed.calls.rpc.dispatch({ type: "client-request", rpcId: "m4", method: "models/refresh", payload: { args: {} } }, undefined);
+    assert.deepEqual(res.value.models, [
+      { id: "brand-new-thing", surface: "responses", input: ["text", "image"] },
+      { id: "mimo-v2.5", surface: "chat", input: ["text"] },
+    ]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("a surface override routes the request to that endpoint", async () => {
+  const { ctx, calls } = stubCtx({ credentials: { resolve: async () => ({ value: "k" }) } });
+  apply(ctx, { enabledModels: ["deepseek-flash"], modelCaps: [{ id: "deepseek-flash", surface: "responses" }] });
+  const seen = [];
+  const realFetch = globalThis.fetch;
+  const controller = new AbortController();
+  globalThis.fetch = async (url, init) => {
+    seen.push(String(url));
+    controller.abort();
+    return realFetch(url, { ...init, signal: controller.signal });
+  };
+  try {
+    for await (const chunk of calls.adapter.adapter.stream({
+      provider: PROVIDER,
+      model: "deepseek-flash",
+      messages: [{ id: "1", role: "user", content: [{ type: "text", text: "hi" }], source: { kind: "user" } }],
+      maxTokens: 1,
+    })) void chunk;
+  } catch {
+    // aborted on purpose after recording the URL; the sandbox may fail too
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  assert.ok(seen[0].endsWith("/v1/responses"), seen[0]);
 });
 
 test("rpc models/refresh returns classified ids", async () => {
@@ -1079,6 +1204,156 @@ test("rpc usage/day validates date and serves groups", async () => {
   assert.equal(okEnvelope.result.ok, true);
   assert.equal(okEnvelope.result.value.date, "2026-09-04");
   assert.deepEqual(okEnvelope.result.value.sessions, []);
+});
+
+test("client card persists per-model capability overrides", async () => {
+  // lib/client.js is a hand-written bundle registered with the browser module
+  // loader; drive it here with a stub React so the model-row controls are
+  // covered without a browser.
+  const require = createRequire(import.meta.url);
+  const buildClient = require("../scripts/build-client.cjs");
+  assert.equal(
+    fs.readFileSync(buildClient.OUT, "utf8"),
+    buildClient.build(),
+    "lib/client.js must be rebuilt from src/client/* (npm run build:client)",
+  );
+
+  let hookIndex = 0;
+  const React = {
+    createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
+    useState: (init) => {
+      void hookIndex;
+      return [typeof init === "function" ? init() : init, () => {}];
+    },
+    useEffect: () => {},
+    useRef: (init) => ({ current: init }),
+    useMemo: (fn) => fn(),
+    Fragment: Symbol("Fragment"),
+  };
+  let factory;
+  const previousWindow = globalThis.window;
+  globalThis.window = { __ModuleLoader__: { load: (entry) => { factory = entry.factory; } } };
+  try {
+    await import(`../lib/client.js?client-card-test=${Date.now()}`);
+    assert.equal(typeof factory, "function", "the bundle must register a factory");
+    const mod = factory((id) => (id === "react" ? React : undefined));
+
+    const settings = {
+      apiKeyEnv: "OPENCODE_GO_API_KEY",
+      enabledModels: ["deepseek-flash", "mimo-v2.5"],
+      modelCaps: [],
+    };
+    const writes = [];
+    const scope = {
+      getSnapshot: () => ({ value: settings }),
+      subscribe: () => () => {},
+      set: (key, value) => { writes.push({ key, value }); settings[key] = value; return Promise.resolve(); },
+    };
+    const registrations = [];
+    const ctx = {
+      effect: () => () => {},
+      locale: { register: () => {} },
+      settingsScope: { bind: () => scope },
+      connection: { rpc: { call: async () => ({ ok: true, value: { models: [
+        { id: "deepseek-flash", surface: "unknown" },
+        { id: "mimo-v2.5", surface: "chat", input: ["text"] },
+      ] } }) } },
+      slots: {
+        inject: (_name, cb) => cb(),
+        register: (options, Component) => { registrations.push({ options, Component }); return () => {}; },
+      },
+      inject: (_deps, cb) => cb({
+        remote: { credentials: { set: async () => ({ ok: true }), unset: async () => ({ ok: true }), describe: async () => ({ ok: true, value: {} }) } },
+        locale: { bind: () => (key) => key },
+      }),
+    };
+    mod.apply(ctx);
+
+    const card = registrations.find((r) => r.options.name === "settings.models.provider-card");
+    assert.ok(card, "the provider card must be registered");
+    const props = card.options.inject();
+    const t = (key) => key;
+    await props.store.refresh(t);
+
+    // h(type, props, array) nests children one level; flatten for option lists.
+    const kids = (node) => (node.children ?? []).flat(Infinity);
+    const selects = [];
+    const walk = (node) => {
+      if (Array.isArray(node)) return node.forEach(walk);
+      if (node === null || typeof node !== "object") return;
+      if (node.type === "select") selects.push(node);
+      (node.children ?? []).forEach(walk);
+    };
+    const byField = (id, field) =>
+      selects.find((s) => String(s.props.key).startsWith(`capsel-${id}-${field}:`));
+    const render = () => {
+      selects.length = 0;
+      walk(card.Component({ ...props, t }));
+    };
+
+    // Unclassified id: three controls, all following the default, while the
+    // catalog's own "unknown" tag stays visible.
+    render();
+    assert.equal(selects.length, 6, "three controls per model row");
+    const surfaceSel = byField("deepseek-flash", "surface");
+    assert.equal(surfaceSel.props.value, "");
+    assert.deepEqual(kids(surfaceSel).map((o) => o.props.value), ["", "chat", "responses", "messages"]);
+    assert.equal(byField("deepseek-flash", "efforts").props.value, "");
+    assert.equal(byField("deepseek-flash", "image").props.value, "");
+    const tags = [];
+    const collectTags = (node) => {
+      if (Array.isArray(node)) return node.forEach(collectTags);
+      if (node === null || typeof node !== "object") return;
+      if (node.type === "span" && node.props.key === "surface") tags.push(node.children[0]);
+      (node.children ?? []).forEach(collectTags);
+    };
+    collectTags(card.Component({ ...props, t }));
+    assert.ok(tags.includes("unknown"), `expected the unknown tag, got ${JSON.stringify(tags)}`);
+
+    // Stating the surface persists an entry, and the level presets follow it.
+    surfaceSel.props.onChange({ target: { value: "responses" } });
+    assert.deepEqual(writes.at(-1), { key: "modelCaps", value: [{ id: "deepseek-flash", surface: "responses" }] });
+    render();
+    assert.equal(byField("deepseek-flash", "surface").props.value, "responses");
+    assert.deepEqual(
+      kids(byField("deepseek-flash", "efforts")).map((o) => o.props.value),
+      ["", "none", "minimal,low,medium,high,xhigh"],
+    );
+
+    // "none" states "no levels"; a full set round-trips; `false` survives.
+    byField("deepseek-flash", "efforts").props.onChange({ target: { value: "none" } });
+    assert.deepEqual(writes.at(-1).value, [{ id: "deepseek-flash", surface: "responses", efforts: [] }]);
+    render();
+    byField("deepseek-flash", "efforts").props.onChange({ target: { value: "minimal,low,medium,high,xhigh" } });
+    assert.deepEqual(writes.at(-1).value, [{
+      id: "deepseek-flash", surface: "responses", efforts: ["minimal", "low", "medium", "high", "xhigh"],
+    }]);
+    render();
+    assert.equal(byField("deepseek-flash", "efforts").props.value, "minimal,low,medium,high,xhigh");
+    byField("deepseek-flash", "image").props.onChange({ target: { value: "false" } });
+    assert.equal(writes.at(-1).value[0].image, false);
+
+    // A known model keeps the table's vocabulary until the user says otherwise.
+    assert.equal(byField("mimo-v2.5", "surface").props.value, "");
+    assert.equal(byField("mimo-v2.5", "efforts").props.value, "");
+    assert.deepEqual(
+      kids(byField("mimo-v2.5", "efforts")).map((o) => o.props.value),
+      ["", "none", "low,medium,high", "low,medium,high,max"],
+    );
+    byField("mimo-v2.5", "image").props.onChange({ target: { value: "true" } });
+    assert.deepEqual(writes.at(-1).value, [
+      { id: "deepseek-flash", surface: "responses", efforts: ["minimal", "low", "medium", "high", "xhigh"], image: false },
+      { id: "mimo-v2.5", image: true },
+    ]);
+    // Clearing an entry's last field drops it instead of leaving a husk.
+    byField("mimo-v2.5", "image").props.onChange({ target: { value: "" } });
+    assert.deepEqual(writes.at(-1).value, [
+      { id: "deepseek-flash", surface: "responses", efforts: ["minimal", "low", "medium", "high", "xhigh"], image: false },
+    ]);
+  } finally {
+    if (previousWindow === undefined) delete globalThis.window;
+    else globalThis.window = previousWindow;
+  }
 });
 
 test("setup-local-deps normalizeCandidate accepts host layouts", () => {

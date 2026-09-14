@@ -122,10 +122,14 @@
 					var entry = at >= 0 ? Object.assign({}, current[at]) : { id: id };
 					if (value === null || value === undefined || value === "") delete entry[field];
 					else entry[field] = value;
+					// An entry exists only while it says something. `false` and `[]`
+					// are statements (text-only, no levels), so they keep it alive.
+					var blank = entry.contextWindow === undefined && entry.maxTokens === undefined &&
+						entry.surface === undefined && entry.image === undefined && entry.efforts === undefined;
 					if (at >= 0) {
-						if (entry.contextWindow === undefined && entry.maxTokens === undefined) current.splice(at, 1);
+						if (blank) current.splice(at, 1);
 						else current[at] = entry;
-					} else if (entry.contextWindow !== undefined || entry.maxTokens !== undefined) {
+					} else if (!blank) {
 						current.push(entry);
 					}
 					try {

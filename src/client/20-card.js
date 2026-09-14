@@ -1,5 +1,21 @@
 		var HEAT_LEVELS = ["#161b22", "#0e4429", "#006d32", "#26a641", "#39d353"];
 		var HEAT_MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+		/**
+		 * Capability a user can state by hand for a model the operator's
+		 * catalog cannot classify (tagged `unknown`). Values are the exact wire
+		 * vocabulary; the empty string means "follow the built-in default".
+		 */
+		var SURFACE_VALUES = ["chat", "responses", "messages"];
+		var EFFORT_PRESETS = {
+			chat: [
+				{ value: "low,medium,high", label: "Low / Medium / High" },
+				{ value: "low,medium,high,max", label: "Low / Medium / High / Max" }
+			],
+			responses: [
+				{ value: "minimal,low,medium,high,xhigh", label: "Minimal / Low / Medium / High / Xhigh" }
+			],
+			messages: []
+		};
 		function fmtTokens(n) {
 			if (n >= 1000000) return (Math.round(n / 100000) / 10) + "M";
 			if (n >= 1000) return (Math.round(n / 100) / 10) + "K";
@@ -305,6 +321,37 @@
 							onKeyDown: function (e) { if (e.key === "Enter") e.target.blur(); }
 						});
 					};
+					var capSelect = function (field, current, options, title, commit) {
+						return h("select", {
+							key: "capsel-" + row.id + "-" + field + ":" + current,
+							style: S.select,
+							value: current,
+							disabled: st.busy !== null,
+							title: title,
+							onChange: function (e) { store.setModelCap(row.id, field, commit(e.target.value)); }
+						}, options.map(function (opt) {
+							return h("option", { key: opt.value, value: opt.value }, opt.label);
+						}));
+					};
+					var labeled = function (key, label, node) {
+						return h("span", { key: key, style: S.ctl },
+							h("span", { key: "l", style: S.ctlLabel }, label),
+							node);
+					};
+					// The surface the levels belong to: the user's own choice, else
+					// what the catalog classified, else the chat fallback the request
+					// path uses. Keeps the level list honest without a refresh.
+					var surface = cap.surface || (row.surface && row.surface !== "unknown" ? row.surface : "chat");
+					var surfaceLabel = cap.surface || "default: " + surface;
+					var effortValue = cap.efforts === undefined ? "" : (cap.efforts.length === 0 ? "none" : cap.efforts.join(","));
+					var effortOptions = [{ value: "", label: t("models.follow") }];
+					if (surface !== "messages") effortOptions.push({ value: "none", label: t("models.effortsNone") });
+					(EFFORT_PRESETS[surface] || []).forEach(function (preset) { effortOptions.push(preset); });
+					// A hand-edited settings file may hold a set no preset names;
+					// show it rather than silently displaying some other choice.
+					if (!effortOptions.some(function (o) { return o.value === effortValue; })) {
+						effortOptions.push({ value: effortValue, label: effortValue.split(",").join(" / ") });
+					}
 					return h("li", { key: row.id, style: S.item },
 						h("input", {
 							type: "checkbox",
@@ -320,6 +367,37 @@
 						(Array.isArray(row.input) ? row.input : []).map(function (mod) {
 							return h("span", { key: "mod-" + mod, style: S.tag }, mod);
 						}),
+						labeled("surface", t("models.surface"), capSelect(
+							"surface",
+							cap.surface || "",
+							[{ value: "", label: t("models.follow") }].concat(SURFACE_VALUES.map(function (value) {
+								return { value: value, label: value };
+							})),
+							surfaceLabel,
+							function (value) { return value === "" ? null : value; }
+						)),
+						labeled("efforts", t("models.efforts"), capSelect(
+							"efforts",
+							effortValue,
+							effortOptions,
+							surfaceLabel,
+							function (value) {
+								if (value === "") return null;
+								if (value === "none") return [];
+								return value.split(",");
+							}
+						)),
+						labeled("image", t("models.image"), capSelect(
+							"image",
+							cap.image === undefined ? "" : String(cap.image),
+							[
+								{ value: "", label: t("models.follow") },
+								{ value: "true", label: t("models.imageOn") },
+								{ value: "false", label: t("models.imageOff") }
+							],
+							surfaceLabel,
+							function (value) { return value === "" ? null : value === "true"; }
+						)),
 						capInput("contextWindow", t("models.ctxPh")),
 						capInput("maxTokens", t("models.maxPh"))
 					);

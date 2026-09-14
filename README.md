@@ -18,7 +18,7 @@ DeepSeek Harness 的 OpenCode Go LLM provider 插件：注册 `zen-go` 路由，
   （`$DSH_HOME/.credentials.yaml`，热加载）→ 项目/家目录 `.env`”分层，
   存换 key 不用重启。无明文字段。
 - **设置卡**：Models 页行 + 设置侧边栏独立入口（key 录入/清除、模型勾选与全选、
-  刷新实时目录、每模型自填上下文与输出上限、密钥状态点）。
+  刷新实时目录、每模型自填上下文/输出上限/端面/思考档位/多模态、密钥状态点）。
 - **推理档位**：responses 系 Minimal/Low/Medium/High/Xhigh（落 `reasoning.effort`），chat 系
   Low/Medium/High（`reasoning_effort` 透传；deepseek-v4-flash/pro/flash-vision-exp
   另有 Max 档——上游网关实测支持，感谢 [@34262315716](https://github.com/34262315716)
@@ -29,6 +29,12 @@ DeepSeek Harness 的 OpenCode Go LLM provider 插件：注册 `zen-go` 路由，
   `["text","image"]`，图片经 attachment 服务读盘转 base64 内联
   （png/jpeg/webp/gif，单图 20MB 上限）；纯文本模型由 runtime 自动替换占位；
   未知 id 默认放行，服务端说了算。
+- **未知模型可手动归类**：官方 `/v1/models` 只给 id，新上线的模型（如 `deepseek-flash`）
+  归类为 `unknown`，于是「选不了思考等级、也定不了多模态」（[#4](https://github.com/xia-sc/dsh-opencode-go/issues/4)）。
+  现在可在设置卡里按模型手填**端面**（chat / responses / messages）、**思考档位**与
+  **多模态**，留空即跟随内置表。端面决定路由与档位词表——chat 落 `reasoning_effort`、
+  responses 落 `reasoning.effort`、messages 无档位词汇，所以档位选项会跟着端面走；
+  手填的 `image` 会同时改写声明与图片准入判定，text-only 的已知模型不会因此被拒。
 - **内容块策略**：user 消息只承载用户载荷（text/image），其余块——reasoning、
   tool-call 这类 harness 注解，以及 merge-extensible 的新类型——一律丢弃而不报错。
   子代理结算通知会把子会话最后的 assistant 内容整段展开进 user 消息，这类块因此会
