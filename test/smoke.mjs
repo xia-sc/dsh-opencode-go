@@ -619,6 +619,81 @@ test("anthropic input translation", () => {
   assert.deepEqual(body2.stop_sequences, ["<end>"]);
 });
 
+test("user messages carry harness annotation blocks without failing (issue #3)", () => {
+  // A settled background subagent expands the child's final assistant content
+  // into a user-role notice, reasoning blocks included.
+  const notice = (content) => ({
+    id: "n", role: "user", content, source: { kind: "subagent-settled", form: "notice" },
+  });
+  const noticeWithReasoning = [notice([
+    { type: "text", text: "Background subagent finished." },
+    { type: "text", text: "Its closing message:" },
+    { type: "reasoning", text: "the diff for icons.tsx is comment-only" },
+  ])];
+
+  const chat = toOpenAiMessages(undefined, noticeWithReasoning);
+  assert.equal(chat[0].role, "user");
+  assert.deepEqual(chat[0].content, [
+    { type: "text", text: "Background subagent finished." },
+    { type: "text", text: "Its closing message:" },
+  ]);
+  assert.deepEqual(toResponsesInput(undefined, noticeWithReasoning).input[0].content, [
+    { type: "input_text", text: "Background subagent finished." },
+    { type: "input_text", text: "Its closing message:" },
+  ]);
+  assert.deepEqual(toAnthropicMessages(undefined, noticeWithReasoning).messages[0].content, [
+    { type: "text", text: "Background subagent finished." },
+    { type: "text", text: "Its closing message:" },
+  ]);
+
+  // Tool annotations and merge-extensible unknowns drop too, and the payload
+  // around them survives.
+  const mixed = [notice([
+    { type: "text", text: "kept" },
+    { type: "tool-call", id: "c1", name: "bash", arguments: "{}" },
+    { type: "tool-result", toolCallId: "c1", content: [{ type: "text", text: "ok" }] },
+    { type: "audio", data: "future-block" },
+  ])];
+  assert.equal(toOpenAiMessages(undefined, mixed)[0].content, "kept");
+  assert.deepEqual(toResponsesInput(undefined, mixed).input[0].content, [{ type: "input_text", text: "kept" }]);
+  assert.deepEqual(toAnthropicMessages(undefined, mixed).messages[0].content, [{ type: "text", text: "kept" }]);
+
+  // A turn whose blocks were all dropped becomes one empty turn — never an
+  // empty `content` array, which upstreams reject.
+  const onlyAnnotation = [notice([{ type: "reasoning", text: "thinking" }])];
+  assert.equal(toOpenAiMessages(undefined, onlyAnnotation)[0].content, "");
+  assert.deepEqual(toResponsesInput(undefined, onlyAnnotation).input[0].content, [{ type: "input_text", text: "" }]);
+  assert.deepEqual(toAnthropicMessages(undefined, onlyAnnotation).messages[0].content, [{ type: "text", text: "" }]);
+
+  // The regression itself: poisoned history no longer fails every later turn.
+  assert.doesNotThrow(() => buildChatBody({ model: "mimo-v2.5", messages: [TEXT_MSG, ...noticeWithReasoning] }));
+  assert.doesNotThrow(() => buildResponsesBody({ model: "mimo-v2.5", messages: [TEXT_MSG, ...noticeWithReasoning] }));
+  assert.doesNotThrow(() => buildAnthropicBody({ model: "mimo-v2.5", messages: [TEXT_MSG, ...noticeWithReasoning] }));
+
+  // Genuine user payload that must not vanish silently still fails loudly.
+  assert.throws(
+    () => toOpenAiMessages(undefined, [notice([{ type: "text", text: "look" }, { type: "image", attachment: { attachmentId: "a", mediaType: "image/png" } }])], new Map(), "mimo-v2.5"),
+    /does not accept image input/,
+  );
+});
+
+test("assistant turns never emit empty content and drop unknown blocks", () => {
+  const assistant = (content) => ({
+    id: "a", role: "assistant", content, source: { kind: "model", provider: PROVIDER, model: "mimo-v2.5" },
+  });
+  // A reasoning-only turn carries nothing for these surfaces: the Messages API
+  // rejects an empty content array, so the turn is omitted instead.
+  const reasoningOnly = [assistant([{ type: "reasoning", text: "thinking" }])];
+  assert.deepEqual(toAnthropicMessages(undefined, reasoningOnly).messages, []);
+  assert.deepEqual(toResponsesInput(undefined, reasoningOnly).input, []);
+  assert.equal(toOpenAiMessages(undefined, reasoningOnly)[0].content, "");
+  // An unknown merge-extensible block is dropped rather than thrown.
+  const unknown = [assistant([{ type: "text", text: "hi" }, { type: "audio", data: "future-block" }])];
+  assert.equal(toOpenAiMessages(undefined, unknown)[0].content, "hi");
+  assert.deepEqual(toResponsesInput(undefined, unknown).input[0].content, [{ type: "output_text", text: "hi" }]);
+  assert.deepEqual(toAnthropicMessages(undefined, unknown).messages[0].content, [{ type: "text", text: "hi" }]);
+});
+
 test("anthropic stop mapping", () => {
   assert.deepEqual(mapAnthropicStop("end_turn"), { kind: "stop" });
   assert.deepEqual(mapAnthropicStop("tool_use"), { kind: "tool-calls" });

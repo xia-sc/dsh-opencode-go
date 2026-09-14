@@ -42,6 +42,16 @@ header on every outbound inference request.
   placeholders); unknown ids stay permissive and the server decides. Images
   resolve from the durable attachment store to inline base64 data URLs per
   surface (png/jpeg/webp/gif, 20 MB cap per image).
+- **Content-block policy**: a user message carries user payload (`text`/`image`)
+  only; every other block — harness annotations such as `reasoning` and
+  `tool-call`, plus merge-extensible additions — is dropped rather than
+  rejected. A settled background subagent expands the child's final assistant
+  content into a user-role notice, so such blocks legitimately appear in
+  history; because that history is durable, throwing on one untranslatable
+  block fails *every later turn* of the conversation
+  ([#3](https://github.com/xia-sc/dsh-opencode-go/issues/3)). The same holds for
+  assistant turns; only `image` still fails loudly, since uploaded binary
+  content must not silently vanish.
 - **Usage**: normalized across all three surfaces (both `prompt_tokens` and
   `input_tokens` vocabularies), provider totals preserved verbatim, cache
   reads/writes and reasoning tokens reported in separate buckets.

@@ -29,6 +29,12 @@ DeepSeek Harness 的 OpenCode Go LLM provider 插件：注册 `zen-go` 路由，
   `["text","image"]`，图片经 attachment 服务读盘转 base64 内联
   （png/jpeg/webp/gif，单图 20MB 上限）；纯文本模型由 runtime 自动替换占位；
   未知 id 默认放行，服务端说了算。
+- **内容块策略**：user 消息只承载用户载荷（text/image），其余块——reasoning、
+  tool-call 这类 harness 注解，以及 merge-extensible 的新类型——一律丢弃而不报错。
+  子代理结算通知会把子会话最后的 assistant 内容整段展开进 user 消息，这类块因此会
+  合法地出现在历史里；历史是持久的，一条转译不了的块若直接抛错，会让该会话**之后每一轮**
+  都失败（见 [#3](https://github.com/xia-sc/dsh-opencode-go/issues/3)）。assistant 侧同理，
+  只有 image 仍然硬报错——用户上传的二进制内容不能被悄悄抹掉。
 - **用量**：三端面 usage 统一换算（`prompt_tokens` / `input_tokens` 双词汇），
   输入输出总量原样保留，缓存读/写、reasoning token 分桶上报。
 - **用量账本**：每次调用记一条（模型/会话/实际发出的 `x-opencode-session`/用途/
