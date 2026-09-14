@@ -5,7 +5,7 @@
 		 */
 		function createZenGoStore(ctx, scope, credentials) {
 			var listeners = new Set();
-			var state = { keyDraft: "", busy: null, error: null, notice: null, live: null, liveAt: 0, keyConfigured: null, summary: null, statsLoaded: false, dayDetail: null };
+			var state = { keyDraft: "", busy: null, error: null, notice: null, live: null, known: null, liveAt: 0, keyConfigured: null, summary: null, statsLoaded: false, dayDetail: null };
 			function snapshot() {
 				var snap = {};
 				try { snap = scope.getSnapshot() || {}; } catch (ignore) { snap = {}; }
@@ -16,6 +16,7 @@
 					error: state.error,
 					notice: state.notice,
 					live: state.live,
+					known: state.known,
 					liveAt: state.liveAt,
 					keyConfigured: state.keyConfigured,
 					summary: state.summary,
@@ -79,6 +80,20 @@
 							if (res && res.ok === true && res.value) {
 								var hit = res.value[refOf()];
 								if (hit) set({ keyConfigured: hit.configured === true });
+							}
+						})
+						.catch(function () {});
+				},
+				loadKnown: function () {
+					// The static classification the request path will use, so the
+					// card's tags and reasoning presets are right even before (or
+					// without) a live catalog refresh. Best effort: a failure just
+					// leaves the rows unclassified.
+					return Promise.resolve()
+						.then(function () { return ctx.connection.rpc.call("/zen-go-rpc", "models/known", { args: {} }); })
+						.then(function (res) {
+							if (res && res.ok === true && res.value && Array.isArray(res.value.models)) {
+								set({ known: res.value.models });
 							}
 						})
 						.catch(function () {});

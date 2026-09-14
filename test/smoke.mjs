@@ -677,6 +677,29 @@ test("rpc models/refresh returns classified ids", async () => {
   }
 });
 
+test("rpc models/known classifies the enabled ids with no key and no network", async () => {
+  const { ctx, calls } = stubCtx({ credentials: { resolve: async () => undefined } });
+  apply(ctx, {
+    enabledModels: ["mimo-v2.5", "muse-spark-1.2-contributor", "brand-new-thing"],
+    modelCaps: [{ id: "brand-new-thing", surface: "responses", image: true }],
+  });
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("models/known must not touch the network"); };
+  try {
+    const res = await calls.rpc.dispatch({ type: "client-request", rpcId: "m5", method: "models/known", payload: { args: {} } }, undefined);
+    assert.equal(res.ok, true);
+    // The card's rows carry the same classification the request path uses, so
+    // its reasoning presets can never offer a vocabulary the surface rejects.
+    assert.deepEqual(res.value.models, [
+      { id: "mimo-v2.5", surface: "chat", input: ["text"] },
+      { id: "muse-spark-1.2-contributor", surface: "responses", input: ["text", "image"] },
+      { id: "brand-new-thing", surface: "responses", input: ["text", "image"] },
+    ]);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
 test("rpc models/refresh without key fails cleanly", async () => {
   const { ctx, calls } = stubCtx({ credentials: { resolve: async () => undefined } });
   apply(ctx, {});
@@ -1218,14 +1241,25 @@ test("client card persists per-model capability overrides", async () => {
     "lib/client.js must be rebuilt from src/client/* (npm run build:client)",
   );
 
+  // A small stateful React stand-in: hooks persist across renders (the row
+  // expansion is component state) and mount effects run once, so the card's
+  // store subscription behaves as it does in the browser.
+  const hooks = [];
   let hookIndex = 0;
+  let effectsDone = false;
+  const cleanups = [];
   const React = {
     createElement: (type, props, ...children) => ({ type, props: props ?? {}, children }),
     useState: (init) => {
-      void hookIndex;
-      return [typeof init === "function" ? init() : init, () => {}];
+      const at = hookIndex++;
+      if (!(at in hooks)) hooks[at] = typeof init === "function" ? init() : init;
+      return [hooks[at], (next) => { hooks[at] = typeof next === "function" ? next(hooks[at]) : next; }];
     },
-    useEffect: () => {},
+    useEffect: (fn) => {
+      if (effectsDone) return;
+      const cleanup = fn();
+      if (typeof cleanup === "function") cleanups.push(cleanup);
+    },
     useRef: (init) => ({ current: init }),
     useMemo: (fn) => fn(),
     Fragment: Symbol("Fragment"),
@@ -1240,7 +1274,7 @@ test("client card persists per-model capability overrides", async () => {
 
     const settings = {
       apiKeyEnv: "OPENCODE_GO_API_KEY",
-      enabledModels: ["deepseek-flash", "mimo-v2.5"],
+      enabledModels: ["deepseek-flash", "mimo-v2.5", "muse-spark-1.2-contributor"],
       modelCaps: [],
     };
     const writes = [];
@@ -1249,15 +1283,25 @@ test("client card persists per-model capability overrides", async () => {
       subscribe: () => () => {},
       set: (key, value) => { writes.push({ key, value }); settings[key] = value; return Promise.resolve(); },
     };
+    // The host's static classification (models/known) is what keeps a non-chat
+    // row from offering the chat level vocabulary; models/refresh adds an id
+    // the static view did not know.
+    const known = [
+      { id: "deepseek-flash", surface: "unknown" },
+      { id: "mimo-v2.5", surface: "chat", input: ["text"] },
+      { id: "muse-spark-1.2-contributor", surface: "responses", input: ["text", "image"] },
+    ];
+    const live = known.concat([{ id: "brand-new-thing", surface: "unknown" }]);
     const registrations = [];
     const ctx = {
       effect: () => () => {},
       locale: { register: () => {} },
       settingsScope: { bind: () => scope },
-      connection: { rpc: { call: async () => ({ ok: true, value: { models: [
-        { id: "deepseek-flash", surface: "unknown" },
-        { id: "mimo-v2.5", surface: "chat", input: ["text"] },
-      ] } }) } },
+      connection: { rpc: { call: async (_channel, method) => {
+        if (method === "models/known") return { ok: true, value: { models: known } };
+        if (method === "models/refresh") return { ok: true, value: { models: live } };
+        return { ok: true, value: {} };
+      } } },
       slots: {
         inject: (_name, cb) => cb(),
         register: (options, Component) => { registrations.push({ options, Component }); return () => {}; },
@@ -1273,48 +1317,79 @@ test("client card persists per-model capability overrides", async () => {
     assert.ok(card, "the provider card must be registered");
     const props = card.options.inject();
     const t = (key) => key;
-    await props.store.refresh(t);
 
     // h(type, props, array) nests children one level; flatten for option lists.
+    // Conditional children arrive as null, so element walks must skip them.
     const kids = (node) => (node.children ?? []).flat(Infinity);
-    const selects = [];
+    const elements = (node) => kids(node).filter((n) => n !== null && typeof n === "object");
+    let nodes = [];
     const walk = (node) => {
       if (Array.isArray(node)) return node.forEach(walk);
       if (node === null || typeof node !== "object") return;
-      if (node.type === "select") selects.push(node);
+      nodes.push(node);
       (node.children ?? []).forEach(walk);
     };
-    const byField = (id, field) =>
-      selects.find((s) => String(s.props.key).startsWith(`capsel-${id}-${field}:`));
     const render = () => {
-      selects.length = 0;
+      nodes = [];
+      hookIndex = 0;
       walk(card.Component({ ...props, t }));
+      effectsDone = true; // effects run on mount only, as React deps say
     };
+    const ofType = (type) => nodes.filter((n) => n.type === type);
+    const selects = () => ofType("select");
+    const byField = (id, field) =>
+      selects().find((s) => String(s.props.key).startsWith(`capsel-${id}-${field}:`));
+    const togglesOf = () => ofType("button").filter((b) => String(b.children[0]).startsWith("models.options"));
+    const summaryOf = (text) => ofType("span").find((s) => s.props.key === "stated" && String(s.children[0]).includes(text));
 
-    // Unclassified id: three controls, all following the default, while the
-    // catalog's own "unknown" tag stays visible.
+    // Rows stay a single tidy line: no capability control is rendered until a
+    // row is expanded.
     render();
-    assert.equal(selects.length, 6, "three controls per model row");
+    assert.equal(selects().length, 0, "collapsed rows render no controls");
+    assert.equal(ofType("input").filter((i) => i.props.type === "input").length, 0, "collapsed rows render no numeric inputs");
+    assert.equal(togglesOf().length, 3, "one options toggle per row");
+    assert.equal(togglesOf()[0].children[0], "models.options ▸");
+
+    // models/known (the mount effect) supplies the host's own classification,
+    // so tags and level presets agree with the request path with no refresh.
+    await props.store.loadKnown();
+    render();
+    assert.deepEqual(
+      elements(ofType("li").find((li) => String(li.props.key) === "deepseek-flash"))
+        .filter((n) => n.type === "span" && n.props.key === "surface").map((n) => n.children[0]),
+      ["unknown"],
+    );
+    assert.deepEqual(
+      elements(ofType("li").find((li) => String(li.props.key) === "muse-spark-1.2-contributor"))
+        .filter((n) => n.type === "span" && n.props.key !== "spacer" && n.props.key !== "id" && n.props.key !== "stated")
+        .map((n) => n.children[0]),
+      ["responses", "text", "image"],
+    );
+    assert.ok(summaryOf("models.surface") === undefined, "nothing is stated before the user sets anything");
+
+    // The unclassified row opens into three controls, all following the default.
+    togglesOf()[0].props.onClick();
+    render();
+    assert.equal(togglesOf()[0].children[0], "models.options ▾", "the open row's toggle points down");
+    assert.equal(ofType("label").length, 5, "five labelled fields in the open panel");
+    assert.equal(selects().length, 3, "three selects in the open panel");
+    assert.equal(ofType("input").filter((i) => i.props.type === "input").length, 2, "two numeric inputs in the open panel");
     const surfaceSel = byField("deepseek-flash", "surface");
     assert.equal(surfaceSel.props.value, "");
     assert.deepEqual(kids(surfaceSel).map((o) => o.props.value), ["", "chat", "responses", "messages"]);
     assert.equal(byField("deepseek-flash", "efforts").props.value, "");
     assert.equal(byField("deepseek-flash", "image").props.value, "");
-    const tags = [];
-    const collectTags = (node) => {
-      if (Array.isArray(node)) return node.forEach(collectTags);
-      if (node === null || typeof node !== "object") return;
-      if (node.type === "span" && node.props.key === "surface") tags.push(node.children[0]);
-      (node.children ?? []).forEach(collectTags);
-    };
-    collectTags(card.Component({ ...props, t }));
-    assert.ok(tags.includes("unknown"), `expected the unknown tag, got ${JSON.stringify(tags)}`);
 
-    // Stating the surface persists an entry, and the level presets follow it.
+    // Only the open row carries controls.
+    assert.equal(byField("mimo-v2.5", "surface"), undefined);
+
+    // Stating the surface persists an entry, shows up in the collapsed
+    // summary, and the level presets follow the surface.
     surfaceSel.props.onChange({ target: { value: "responses" } });
     assert.deepEqual(writes.at(-1), { key: "modelCaps", value: [{ id: "deepseek-flash", surface: "responses" }] });
     render();
     assert.equal(byField("deepseek-flash", "surface").props.value, "responses");
+    assert.ok(summaryOf("models.surface responses"), "the collapsed row states what was set");
     assert.deepEqual(
       kids(byField("deepseek-flash", "efforts")).map((o) => o.props.value),
       ["", "none", "minimal,low,medium,high,xhigh"],
@@ -1324,6 +1399,7 @@ test("client card persists per-model capability overrides", async () => {
     byField("deepseek-flash", "efforts").props.onChange({ target: { value: "none" } });
     assert.deepEqual(writes.at(-1).value, [{ id: "deepseek-flash", surface: "responses", efforts: [] }]);
     render();
+    assert.ok(summaryOf("models.efforts models.effortsNone"), "an empty level list reads as none, not as unset");
     byField("deepseek-flash", "efforts").props.onChange({ target: { value: "minimal,low,medium,high,xhigh" } });
     assert.deepEqual(writes.at(-1).value, [{
       id: "deepseek-flash", surface: "responses", efforts: ["minimal", "low", "medium", "high", "xhigh"],
@@ -1333,7 +1409,32 @@ test("client card persists per-model capability overrides", async () => {
     byField("deepseek-flash", "image").props.onChange({ target: { value: "false" } });
     assert.equal(writes.at(-1).value[0].image, false);
 
-    // A known model keeps the table's vocabulary until the user says otherwise.
+    // A collapsed row keeps no controls; expansion is per row. Re-read the
+    // toggle each time: a handler captured from an earlier render closes over
+    // that render's state, where a real DOM node would carry the newest one.
+    togglesOf()[0].props.onClick();
+    render();
+    assert.equal(selects().length, 0, "collapsing the row removes its controls again");
+
+    // The known classification fixes the presets: a responses model is offered
+    // the responses vocabulary, never the chat one that carries Max (which the
+    // host would reject for it).
+    togglesOf()[2].props.onClick();
+    render();
+    assert.equal(selects().length, 3, "one open panel at a time");
+    assert.equal(byField("muse-spark-1.2-contributor", "surface").props.value, "");
+    assert.deepEqual(
+      kids(byField("muse-spark-1.2-contributor", "efforts")).map((o) => o.props.value),
+      ["", "none", "minimal,low,medium,high,xhigh"],
+    );
+    assert.equal(byField("mimo-v2.5", "efforts"), undefined, "an unopened row renders no selects");
+
+    // A second row opens independently and keeps the table's vocabulary.
+    togglesOf()[2].props.onClick();
+    render();
+    togglesOf()[1].props.onClick();
+    render();
+    assert.equal(selects().length, 3, "one open panel at a time");
     assert.equal(byField("mimo-v2.5", "surface").props.value, "");
     assert.equal(byField("mimo-v2.5", "efforts").props.value, "");
     assert.deepEqual(
@@ -1350,6 +1451,16 @@ test("client card persists per-model capability overrides", async () => {
     assert.deepEqual(writes.at(-1).value, [
       { id: "deepseek-flash", surface: "responses", efforts: ["minimal", "low", "medium", "high", "xhigh"], image: false },
     ]);
+
+    // A live refresh wins over the static classification, so the card follows
+    // whatever the server currently serves.
+    await props.store.refresh(t);
+    render();
+    assert.ok(
+      ofType("li").some((li) => String(li.props.key) === "brand-new-thing"),
+      "the refreshed catalog replaces the static rows",
+    );
+    for (const cleanup of cleanups) cleanup();
   } finally {
     if (previousWindow === undefined) delete globalThis.window;
     else globalThis.window = previousWindow;

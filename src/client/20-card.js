@@ -209,6 +209,7 @@
 				return store.subscribe(function () { setSt(store.snapshot()); });
 			}, [store]);
 			React.useEffect(function () { store.refreshStats(t); }, [store]);
+			React.useEffect(function () { store.loadKnown(); }, [store]);
 			var tabPair = React.useState("overview");
 			var statsTab = tabPair[0];
 			var setStatsTab = tabPair[1];
@@ -218,6 +219,26 @@
 			var dayPair = React.useState(null);
 			var selectedDate = dayPair[0];
 			var setSelectedDate = dayPair[1];
+			// Which rows have their options panel open, keyed by model id. Rows
+			// stay one tidy line until asked; the summary keeps what was set
+			// visible without expanding.
+			var openPair = React.useState(function () { return {}; });
+			var openRows = openPair[0];
+			var setOpenRows = openPair[1];
+			// The row whose panel was just opened, so its ref can bring it into
+			// view: the model list is its own scroll box, and a panel opened near
+			// the bottom would otherwise be half out of sight.
+			var justOpened = React.useRef(null);
+			var toggleRow = function (id) {
+				var next = Object.assign({}, openRows);
+				if (next[id] === true) {
+					delete next[id];
+				} else {
+					next[id] = true;
+					justOpened.current = id;
+				}
+				setOpenRows(next);
+			};
 			var onSelectDate = function (date) {
 				if (date === null || date === selectedDate) {
 					setSelectedDate(null);
@@ -234,8 +255,16 @@
 			var rows;
 			if (live) {
 				rows = live;
+			} else if (Array.isArray(st.known)) {
+				// The host's own classification of the enabled ids: the same view
+				// the request path uses, so a non-chat row offers that surface's
+				// level vocabulary instead of the chat fallback's.
+				rows = st.known;
 			} else if (enabled) {
-				rows = enabled.map(function (id) { return { id: id, surface: "chat" }; });
+				// Last resort for the one paint before `models/known` lands: no
+				// classification, so no tag, and the presets use the chat fallback
+				// the request path itself would use for an unclassified id.
+				rows = enabled.map(function (id) { return { id: id }; });
 			} else {
 				rows = [];
 			}
@@ -333,9 +362,9 @@
 							return h("option", { key: opt.value, value: opt.value }, opt.label);
 						}));
 					};
-					var labeled = function (key, label, node) {
-						return h("span", { key: key, style: S.ctl },
-							h("span", { key: "l", style: S.ctlLabel }, label),
+					var field = function (key, label, node) {
+						return h("label", { key: key, style: S.field },
+							h("span", { key: "l", style: S.fieldLabel }, label),
 							node);
 					};
 					// The surface the levels belong to: the user's own choice, else
@@ -352,6 +381,17 @@
 					if (!effortOptions.some(function (o) { return o.value === effortValue; })) {
 						effortOptions.push({ value: effortValue, label: effortValue.split(",").join(" / ") });
 					}
+					var isOpen = openRows[row.id] === true;
+					// What this row states by hand, so the collapsed line still tells
+					// the truth about a model the user configured.
+					var stated = [];
+					if (cap.surface !== undefined) stated.push(t("models.surface") + " " + cap.surface);
+					if (cap.efforts !== undefined) {
+						stated.push(t("models.efforts") + " " + (cap.efforts.length === 0 ? t("models.effortsNone") : cap.efforts.join(" / ")));
+					}
+					if (cap.image !== undefined) stated.push(t("models.image") + " " + (cap.image ? t("models.imageOn") : t("models.imageOff")));
+					if (cap.contextWindow !== undefined) stated.push(t("models.ctxPh") + " " + cap.contextWindow);
+					if (cap.maxTokens !== undefined) stated.push(t("models.maxPh") + " " + cap.maxTokens);
 					return h("li", { key: row.id, style: S.item },
 						h("input", {
 							type: "checkbox",
@@ -360,46 +400,75 @@
 							title: row.id,
 							onChange: function () { store.toggleModel(row.id); }
 						}),
-						h("span", { key: "id" }, row.id),
+						h("span", { key: "id", style: S.modelId }, row.id),
 						row.surface && row.surface !== "chat"
 							? h("span", { key: "surface", style: S.tag }, row.surface)
 							: null,
 						(Array.isArray(row.input) ? row.input : []).map(function (mod) {
 							return h("span", { key: "mod-" + mod, style: S.tag }, mod);
 						}),
-						labeled("surface", t("models.surface"), capSelect(
-							"surface",
-							cap.surface || "",
-							[{ value: "", label: t("models.follow") }].concat(SURFACE_VALUES.map(function (value) {
-								return { value: value, label: value };
-							})),
-							surfaceLabel,
-							function (value) { return value === "" ? null : value; }
-						)),
-						labeled("efforts", t("models.efforts"), capSelect(
-							"efforts",
-							effortValue,
-							effortOptions,
-							surfaceLabel,
-							function (value) {
-								if (value === "") return null;
-								if (value === "none") return [];
-								return value.split(",");
+						h("span", { key: "spacer", style: S.spacer }),
+						stated.length === 0 ? null : h("span", {
+							key: "stated",
+							style: S.summary,
+							title: stated.join(" · ")
+						}, stated.join(" · ")),
+						h("button", {
+							key: "toggle",
+							type: "button",
+							style: S.toggle,
+							disabled: st.busy !== null,
+							"aria-expanded": isOpen,
+							title: t("models.options"),
+							onClick: function () { toggleRow(row.id); }
+						}, t("models.options") + (isOpen ? " ▾" : " ▸")),
+						isOpen ? h("div", {
+							key: "panel",
+							style: S.panel,
+							// ref callbacks need a function identity React can drop in
+							// without re-invoking: read the flag, do not capture it.
+							ref: function (node) {
+								if (node === null || justOpened.current !== row.id) return;
+								justOpened.current = null;
+								if (typeof node.scrollIntoView === "function") node.scrollIntoView({ block: "nearest" });
 							}
-						)),
-						labeled("image", t("models.image"), capSelect(
-							"image",
-							cap.image === undefined ? "" : String(cap.image),
-							[
-								{ value: "", label: t("models.follow") },
-								{ value: "true", label: t("models.imageOn") },
-								{ value: "false", label: t("models.imageOff") }
-							],
-							surfaceLabel,
-							function (value) { return value === "" ? null : value === "true"; }
-						)),
-						capInput("contextWindow", t("models.ctxPh")),
-						capInput("maxTokens", t("models.maxPh"))
+						},
+							h("div", { key: "grid", style: S.panelGrid },
+								field("surface", t("models.surface"), capSelect(
+									"surface",
+									cap.surface || "",
+									[{ value: "", label: t("models.follow") }].concat(SURFACE_VALUES.map(function (value) {
+										return { value: value, label: value };
+									})),
+									surfaceLabel,
+									function (value) { return value === "" ? null : value; }
+								)),
+								field("efforts", t("models.efforts"), capSelect(
+									"efforts",
+									effortValue,
+									effortOptions,
+									surfaceLabel,
+									function (value) {
+										if (value === "") return null;
+										if (value === "none") return [];
+										return value.split(",");
+									}
+								)),
+								field("image", t("models.image"), capSelect(
+									"image",
+									cap.image === undefined ? "" : String(cap.image),
+									[
+										{ value: "", label: t("models.follow") },
+										{ value: "true", label: t("models.imageOn") },
+										{ value: "false", label: t("models.imageOff") }
+									],
+									surfaceLabel,
+									function (value) { return value === "" ? null : value === "true"; }
+								)),
+								field("contextWindow", t("models.ctxPh"), capInput("contextWindow", t("models.ctxPh"))),
+								field("maxTokens", t("models.maxPh"), capInput("maxTokens", t("models.maxPh")))
+							)
+						) : null
 					);
 				})));
 				children.push(h("div", { key: "mnote", style: S.meta }, t("models.surfaces")));
