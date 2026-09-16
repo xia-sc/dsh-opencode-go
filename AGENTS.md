@@ -90,6 +90,21 @@ node scripts/setup-local-deps.cjs [--host <dir>] [--dry-run]   # 本地源码安
    先投影），重新内联就是撤销别人的持久决定；② 请求超预算时**抛错而不是自己丢图**——丢图是
    持久会话决定，只有 harness 能记录；③ 判定必须在 dispatch 之前，所以用 durable ref 自带的
    `bytes` 记账，不读盘。三条都有 `test/host-compat.mjs` 的行为级断言兜着。
+   顺带记住图片体积的真实边界，别在文档里写「原图直塞」：**单图大小由 attachment 的准入
+   归一化决定**（本部署 ≤4 MiB / ≤2048×2048，`imageHostPath` 给的就是归一化副本），
+   插件的 `MAX_INLINE_IMAGE_BYTES`（20 MiB）只对不做归一化的 provider 生效，是兜底；
+   真正的请求级保护是 `maxRequestImageBytes`，且它按**张数**才会撞线（单图 base64 后约
+   5.4 MiB，64 MiB 约合十余张同请求）。
+14. **回放降级、创作严格**：同一条 tool-call 在两个方向上的策略是相反的，别搞混。
+    - **创作**（`pumpMessages`）：provider 刚说完 `stop_reason: tool_use`、参数却不是 JSON
+      → **抛** `PROVIDER_PROTOCOL_ERROR`。那是上游违反协议，一个无法执行的调用不该被保留
+      或派发（宿主的 max-tokens 与 interrupt 规则也是这个取向）。
+    - **回放**（`toAnthropicMessages` 的 `toolInput`）：持久历史里的 `arguments` 非法或不是
+      对象 → **退成 `{}` 照发**。这个调用早就执行过、也有 `tool_result` 了，抛错只会让该
+      会话在 messages 端面上**之后每一轮都失败**（#3 同一类）。对端要求 `input` 是对象，
+      所以 `"5"` / `"[1]"` / `"null"` 和非法 JSON 一样都得降级。
+      宿主自己也容忍这种畸形（`dsh-agent-loop` 的 `parseArguments` 保留原文、
+      `dsh-llm-pi-ai` 退成 `{}`），只有 `dsh-llm-deepseek` 的 messages 实现选择抛。
 
 ## 测试怎么写
 

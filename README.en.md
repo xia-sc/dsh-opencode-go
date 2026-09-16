@@ -44,7 +44,14 @@ header on every outbound inference request.
   images through; other known models are text-only (the runtime substitutes
   placeholders); unknown ids stay permissive and the server decides. Images
   resolve from the durable attachment store to inline base64 data URLs per
-  surface (png/jpeg/webp/gif, 20 MB cap per image).
+  surface (png/jpeg/webp/gif). **One image's size is decided by the attachment
+  store's admission-time normalization, not by this plugin**: this deployment
+  reduces every image to ≤ 4 MiB and ≤ 2048×2048 px (≤ 8192 per side; uploads
+  are capped at 20 MiB each and 200 MiB per message), and `imageHostPath` hands
+  back that normalized copy — so what gets inlined is never the original upload.
+  The plugin's own 20 MiB per-image check therefore only fires for an attachment
+  provider that does no normalization: it is a fallback, not the guard that
+  matters.
 - **Over-budget images take the harness's offload path**: when one request's
   inline image bytes (the base64 the body carries) exceed
   `maxRequestImageBytes` (64 MiB by default) this plugin does **not** drop
@@ -55,7 +62,9 @@ header on every outbound inference request.
   before dispatch (a durable ref carries its encoded size, so nothing is read).
   Occurrences the harness already marked `offloaded` always travel as
   placeholder text and are never re-inlined — that bookkeeping is the harness's,
-  not a route's to reverse.
+  not a route's to reverse. Note what triggers it: image *count*, not one image's
+  size — a normalized image is about 5.4 MiB once base64-encoded, so the 64 MiB
+  default is roughly a dozen images in one request.
 - **Unclassified models can be described by hand**: the operator's `/v1/models`
   discloses ids only, so a newly served model (say `deepseek-flash`) is
   classified `unknown` — which is why neither a reasoning level nor a modality
@@ -153,7 +162,7 @@ settings card.
 | `apiKeyEnv` | `OPENCODE_GO_API_KEY` | credential ref name |
 | `apiBase` | `https://opencode.ai/zen/go` | base URL without the trailing `/v1` prefix |
 | `requestTimeoutMs` / `streamIdleTimeoutMs` | `60000` / `300000` | connect + first-byte timeout (timer stops at response headers; long streams aren't capped by total time) / stream idle watchdog |
-| `maxRequestImageBytes` | `67108864` (64 MiB) | inline image budget for one request, counted in the **base64 bytes the body carries**; above it the route fails with `IMAGE_OFFLOAD_REQUIRED` so the harness drops the oldest occurrences and retries. The operator publishes no request-size limit, so this is a deployment value: the default sits far above ordinary screenshot traffic — lower it toward a proxy's body cap |
+| `maxRequestImageBytes` | `67108864` (64 MiB) | inline image budget for one request, counted in the **base64 bytes the body carries**; above it the route fails with `IMAGE_OFFLOAD_REQUIRED` so the harness drops the oldest occurrences and retries. The operator publishes no request-size limit, so this is a deployment value: the default sits far above ordinary screenshot traffic (a normalized image is ~5.4 MiB encoded, so roughly a dozen in one request) — lower it toward a proxy's body cap |
 | `enabledModels` | whole table | which models are offered (the card checkboxes edit this) |
 | `modelCaps` | `[]` | `[{id, contextWindow?, maxTokens?, surface?, image?, efforts?}]`, user-filled capacity and capability overrides |
 

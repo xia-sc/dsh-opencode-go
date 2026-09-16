@@ -27,16 +27,21 @@ DeepSeek Harness 的 OpenCode Go LLM provider 插件：注册 `zen-go` 路由，
   无档位词汇（显式传会报错）。
   均不设默认值，Default 即不发字段。
 - **多模态**：vision 模型（`deepseek-v4-flash-vision-exp`、两个 muse-spark）声明
-  `["text","image"]`，图片经 attachment 服务读盘转 base64 内联
-  （png/jpeg/webp/gif，单图 20MB 上限）；纯文本模型由 runtime 自动替换占位；
-  未知 id 默认放行，服务端说了算。
+  `["text","image"]`，图片经 attachment 服务读盘转 base64 内联（png/jpeg/webp/gif）；
+  纯文本模型由 runtime 自动替换占位；未知 id 默认放行，服务端说了算。
+  **单图大小由 attachment 的准入归一化决定，不是本插件**：本部署在准入时就把每张图
+  压到 ≤ 4 MiB / ≤ 2048×2048 像素（单边 ≤ 8192；上传侧单图 ≤ 20 MiB、单消息 ≤ 200 MiB），
+  而 `imageHostPath` 给的就是那份**归一化副本**——所以我们内联的不是原始上传。
+  插件自己那条 20 MiB 单图检查只对**不做归一化的 attachment provider** 生效，是兜底
+  而不是主力。
 - **图片超限走 harness 的卸载回路**：一次请求内联图片总量（base64 后的字节数）超过
   `maxRequestImageBytes`（默认 64 MiB）时，本插件**不自己丢图**，而是抛
   `IMAGE_OFFLOAD_REQUIRED` 并附上「最旧的几张要丢」——
   `dsh-compaction-image-offload` 记下这个决定并重试该步。丢图是**持久会话决定**，
   只能由 harness 记录，所以判定一定发生在发请求之前（durable ref 自带字节数，
   不读盘）。已由 harness 标记 `offloaded` 的图片一律按占位文本发送，**不会**被重新
-  内联——那是它自己的账，路由无权撤销。
+  内联——那是它自己的账，路由无权撤销。注意触发条件是图片**张数**而非单图体积：
+  归一化后单图约 5.4 MiB（base64），64 MiB 预算约合十余张同请求。
 - **未知模型可手动归类**：官方 `/v1/models` 只给 id，新上线的模型（如 `deepseek-flash`）
   归类为 `unknown`，于是「选不了思考等级、也定不了多模态」（[#4](https://github.com/xia-sc/dsh-opencode-go/issues/4)）。
   现在可在设置卡里按模型手填**端面**（chat / responses / messages）、**思考档位**与
@@ -110,7 +115,7 @@ refs:
 | `apiKeyEnv` | `OPENCODE_GO_API_KEY` | credential ref 名 |
 | `apiBase` | `https://opencode.ai/zen/go` | 去掉尾部 `/v1` 前缀后的基址 |
 | `requestTimeoutMs` / `streamIdleTimeoutMs` | `60000` / `300000` | 建连+首包超时（响应头一到即停表，长流不受总时长限制） / 流空闲看门狗 |
-| `maxRequestImageBytes` | `67108864`（64 MiB） | 单请求内联图片总量上限，按**进请求体的 base64 字节**计；超了抛 `IMAGE_OFFLOAD_REQUIRED` 让 harness 卸载最旧的几张并重试。上游没公布请求体上限，所以这是部署取值：默认远高于日常截图流量，代理有更小的 body cap 就往下调 |
+| `maxRequestImageBytes` | `67108864`（64 MiB） | 单请求内联图片总量上限，按**进请求体的 base64 字节**计；超了抛 `IMAGE_OFFLOAD_REQUIRED` 让 harness 卸载最旧的几张并重试。上游没公布请求体上限，所以这是部署取值：默认远高于日常截图流量（归一化后单图约 5.4 MiB，约合十余张同请求），代理有更小的 body cap 就往下调 |
 | `enabledModels` | 全表 | 提供哪些模型（卡片勾选即改这里） |
 | `modelCaps` | `[]` | `[{id, contextWindow?, maxTokens?, surface?, image?, efforts?}]`，自填容量与能力覆盖 |
 

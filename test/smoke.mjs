@@ -897,14 +897,25 @@ test("anthropic input translation", () => {
   const errMsg = { id: "9", role: "user", content: [errBlock], source: { kind: "tool", callId: "c9" } };
   const out = toAnthropicMessages(undefined, [errMsg]);
   assert.equal(out.messages[0].content[0].is_error, true);
-  assert.throws(
-    () => toAnthropicMessages(undefined, [{
-      id: "8", role: "assistant",
-      content: [{ type: "tool-call", id: "c8", name: "bash", arguments: "not-json{" }],
-      source: { kind: "model", provider: PROVIDER, model: "x" },
-    }]),
-    /not valid JSON/,
-  );
+
+  // Durable history is re-sent whatever its arguments look like. The call has
+  // already run and already has its tool_result; the Messages API needs an
+  // object, so a malformed or non-object payload degrades instead of failing
+  // every later turn of the conversation on this surface.
+  const callMsg = (argumentsText) => ({
+    id: "8", role: "assistant",
+    content: [{ type: "tool-call", id: "c8", name: "bash", arguments: argumentsText }],
+    source: { kind: "model", provider: PROVIDER, model: "x" },
+  });
+  const inputOf = (argumentsText) => toAnthropicMessages(undefined, [callMsg(argumentsText)]).messages[0].content[0];
+  assert.deepEqual(inputOf('{"cmd":"ls"}').input, { cmd: "ls" }, "a valid object is passed through");
+  for (const malformed of ["not-json{", "", "[1,2]", "null", "5", '"text"']) {
+    const block = inputOf(malformed);
+    assert.equal(block.type, "tool_use");
+    assert.equal(block.name, "bash", "the call itself is still replayed");
+    assert.deepEqual(block.input, {}, `arguments ${JSON.stringify(malformed)} must degrade to an object`);
+  }
+
   const body = buildAnthropicBody({ model: "qwen3.8-max", messages: [TEXT_MSG] });
   assert.equal(body.max_tokens, 8192);
   assert.equal(body.stream, true);
@@ -1096,8 +1107,27 @@ test("pumpMessages emits text, thinking, tool use, usage, finish", async () => {
   assert.deepEqual(chunks[7].reason, { kind: "tool-calls" });
 });
 
-test("pumpChunks surfaces provider error events directly", async () => {
+test("pumpMessages still refuses a freshly streamed call whose arguments are not JSON", async () => {
+  // The other half of the history policy: replay degrades, creation does not.
+  // A tool call the provider just finished with unparseable input is an
+  // upstream protocol violation, and retaining a call nothing can execute
+  // would only surface later, as a worse failure. The turn fails here instead.
   const adapter = testAdapter();
+  const events = [
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"tu_1","name":"bash"}}',
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"{\\"cmd\\":"}}',
+    'data: {"type":"content_block_stop","index":0}',
+    'data: {"type":"message_delta","delta":{"stop_reason":"tool_use"}}',
+  ];
+  await assert.rejects(
+    (async () => {
+      for await (const c of adapter.pumpMessages(sseStream(events), undefined, 5000)) void c;
+    })(),
+    (e) => e.code === "PROVIDER_PROTOCOL_ERROR" && /truncated tool input/.test(e.message),
+  );
+});
+
+test("pumpChunks surfaces provider error events directly", async () => {  const adapter = testAdapter();
   const events = sseStream(['data: {"type":"error","error":{"message":"overloaded"}}']);
   await assert.rejects(
     (async () => {
