@@ -5,7 +5,11 @@
 
 - 包名 `@dsh-plugins/dsh-opencode-go`，是 DeepSeek Harness 的 LLM provider 插件，
   注册 `zen-go` 路由（上游是 OpenCode Go 的 OpenAI 兼容端点）。
-- 运行环境：Node `>=22`（`engines`）；peer 依赖 `@deepseek-ai/dsh-*` 为 `^0.1.5-rc.1`。
+- 运行环境：Node `>=22`（`engines`）；peer 依赖 `@deepseek-ai/dsh-*` 为 `^0.1.6-alpha.1`
+  —— 预发布区间要写成**同一个 tuple**，`^0.1.5-rc.1` 在 semver 规则下不接受
+  `0.1.6-alpha.1`，装出来会去解析 `0.1.5-rc.x`。0.1.6 的图片 offload 契约
+  （`projectOffloadedImages` / `requiredImageOffload` / `IMAGE_OFFLOAD_REQUIRED`）
+  是本插件的硬依赖，所以下限就是 0.1.6。
 - 当前版本见 `package.json`（`PLUGIN_VERSION` 由它派生，会进 `user-agent`）。
 - 功能说明看 `README.md`（中文主文档）/ `README.en.md`。
 
@@ -20,16 +24,18 @@
 | `lib/usage.js` | 用量账本（JSONL、聚合） | |
 | `lib/client.js` | **生成物**：`src/client/*.js` 拼接后的浏览器半 | **禁止手改**，见下 |
 | `src/client/*.js` | 浏览器半源码，7 个分片按 `scripts/build-client.cjs` 的 `ORDER` 拼接 | `00-head`(入口) / `01-dicts`(i18n) / `02-ui`(样式+helper) / `10-store`(状态) / `20-card`(主卡片) / `21-section`(侧栏入口) / `99-tail`(`apply`) |
-| `test/smoke.mjs` | 全部测试（`node:test`，单文件） | 唯一测试入口 |
+| `test/smoke.mjs` | 插件自洽测试（`node:test`，单文件）；宿主面全部 `stubCtx` 打桩 | 默认门禁 |
+| `test/host-compat.mjs` | **真宿主**回归：从 `node_modules` 里 import 真实的 `@deepseek-ai/dsh-llm` / `dsh-invariants` / `cordis`，走真 `llm` 服务与真流语法不变量 | 版本敏感；宿主换版后先跑这个 |
 | `scripts/build-client.cjs` | 拼接 + `vm` 语法门禁（先校验后写盘）；导出 `{ ORDER, OUT, build }` | 测试会调用 `build()` 做同步断言 |
 | `scripts/setup-local-deps.cjs` | 本地源码安装时把 `node_modules/@deepseek-ai` 桥到宿主安装树（Windows junction） | 只在 `link:` 安装下需要 |
-| `cordis.patch.yml` | 组合层 patch（`id` + 完整包名 + 默认 config） | 头部注释已过时，见文末「已知文档债」 |
+| `cordis.patch.yml` | 组合层 patch（`id` + 完整包名 + 默认 config） | 只放组合层字段；用户可调的都进 settings |
 
 ## 常用命令
 
 ```powershell
 node test/smoke.mjs      # 推荐：本进程内跑完全部测试
 npm test                 # = node --test test/smoke.mjs（在受限沙箱里会 spawn EPERM）
+node test/host-compat.mjs  # 真宿主回归（宿主换版后必跑）
 npm run build:client     # 改过 src/client/* 之后必须跑
 node scripts/setup-local-deps.cjs [--host <dir>] [--dry-run]   # 本地源码安装桥接
 ```
@@ -56,6 +62,11 @@ node scripts/setup-local-deps.cjs [--host <dir>] [--dry-run]   # 本地源码安
    `models/refresh` 与 `models/known` 共用 `classifyModel()`，避免卡上的展示与实际请求分叉。
    声明 `image: true` 时，`imagePart` 的准入判定也必须放行（runtime 会凭同一声明把图片放行），
    所以覆盖要顺着参数一路传下去，不能只改 `resolveModel`。
+   **`surface` 与 `efforts` 是被一起校验的一个组合**，不是两个独立字段：卡片改端面时必须把档位
+   收敛进**同一次** `scope.set`（走 `setModelCapFields`），否则会持久化一个被拒绝的组合——宿主
+   把整段设置丢掉，路由静默退回默认值。收敛规则见 `20-card.js` 的 `levelVocabulary` /
+   `reconcileEfforts`；「跟随默认」时的可用档位来自每行的 `defaultEfforts`（由 `classifyModel`
+   给出，不能让客户端猜：未归类模型跟随 chat 端面，但本身不提供任何档位）。
 6. **配置校验 fail-fast**：`resolveOptions` 对非法值直接抛（含档位 id 与端面不匹配、messages
    端面给档位等）；`apply` 捕获后保留上一份好配置并记日志。新增字段时同步更新 `Config`
    schema、`resolveOptions`、测试与 README。
@@ -72,12 +83,24 @@ node scripts/setup-local-deps.cjs [--host <dir>] [--dry-run]   # 本地源码安
 12. 三段式改动（`modelCaps` 这类）要同时顾及：schema、校验、`resolveModel`/`listModels`、
    路由、客户端 UI、i18n、测试、README、版本号。漏一段就会出现「卡上能填、请求不生效」
    这类半成品。
+13. **图片 offload 是 adapter 的责任（0.1.5 起，0.1.6 才强制）**：0.1.6 的 `dsh-llm` 提供
+   `projectOffloadedImages` / `requiredImageOffload` / `IMAGE_OFFLOAD_REQUIRED`，
+   而 `dsh-compaction-image-offload`（0.1.6 才有的包）只监听那个错误码。三条不能破：
+   ① 已被 harness 标记 `offloaded` 的图片**永远**按占位文本发（`stream()` 里在所有读盘之前
+   先投影），重新内联就是撤销别人的持久决定；② 请求超预算时**抛错而不是自己丢图**——丢图是
+   持久会话决定，只有 harness 能记录；③ 判定必须在 dispatch 之前，所以用 durable ref 自带的
+   `bytes` 记账，不读盘。三条都有 `test/host-compat.mjs` 的行为级断言兜着。
 
 ## 测试怎么写
 
 - 单文件 `test/smoke.mjs`，用 `node:test` + `node:assert/strict`；跑法见上。
 - 宿主侧用 `stubCtx({ credentials, providers })` 拿到被 `apply()` 注册的对象
   （`calls.adapter.adapter` / `calls.rpc.dispatch`），再直接调用 adapter 方法或 RPC 端点。
+- `test/host-compat.mjs` 补的是 smoke 打桩**测不到**的那一层：它用真 `@deepseek-ai/dsh-llm`
+  起一个真 cordis app（外加真 `dsh-invariants` + `dsh-llm/invariant` 的流语法校验），
+  只把 `connection` / `webServer` / `settings` / `credentials` / `attachments` / `fs` 打桩。
+  宿主换版本后先跑它：宿主收紧契约（例如 0.1.6 把图片 offload 从 runtime 挪进 adapter）
+  只有这一层能发现。**已知未实现项的断言写成 `{ skip: '原因' }`**，修好后删掉 skip 即验收。
 - 需要一个 key 的联网探针（`live /v1/models`）在无 key 时自动 skip —— **skip 不是失败**，
   当前基线是「N 项，N-1 pass + 1 skip」。
 - 浏览器半用 `stub React`（`createElement` / 有状态的 `useState` / 仅挂载运行的 `useEffect`）
@@ -123,8 +146,7 @@ node scripts/setup-local-deps.cjs [--host <dir>] [--dry-run]   # 本地源码安
 
 ## 已知文档债
 
-- `cordis.patch.yml` 头部注释过时：写着「no browser half」和 `opencode-go`
-  provider route，而实际既有浏览器半、路由也叫 `zen-go`。改这个文件时顺手修正注释。
+（暂无。`cordis.patch.yml` 头部注释已在 v0.9.0-rc.1 一并修正。）
 
 ## 相关背景
 

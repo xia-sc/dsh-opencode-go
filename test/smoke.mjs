@@ -11,6 +11,7 @@ import {
   apiAttributionHeaders,
   CHAT_MODEL_IDS,
   Config,
+  DEFAULT_MAX_REQUEST_IMAGE_BYTES,
   NS,
   OpencodeGoAdapter,
   PROVIDER,
@@ -244,7 +245,128 @@ test("apiAttributionHeaders carries the plugin identity everywhere", () => {
   assert.deepEqual(buildHeaders("k", "s")["user-agent"], ua);
 });
 
-function stubCtx({ credentials, providers = [] } = {}) {
+test("maxRequestImageBytes defaults, validates and reaches the adapter budget", async () => {
+  const validated = await Config["~standard"].validate({});
+  assert.equal(validated.issues, undefined);
+  assert.equal(validated.value.maxRequestImageBytes, DEFAULT_MAX_REQUEST_IMAGE_BYTES);
+  assert.equal(resolveOptions({}).maxRequestImageBytes, DEFAULT_MAX_REQUEST_IMAGE_BYTES);
+  assert.equal(resolveOptions({ maxRequestImageBytes: 1024 }).maxRequestImageBytes, 1024);
+  assert.throws(() => resolveOptions({ maxRequestImageBytes: 0 }), /maxRequestImageBytes/);
+  assert.throws(() => resolveOptions({ maxRequestImageBytes: -1 }), /maxRequestImageBytes/);
+  assert.throws(() => resolveOptions({ maxRequestImageBytes: 1.5 }), /maxRequestImageBytes/);
+
+  // The enforced budget is the resolved one, counted the way the wire counts
+  // it (base64), so a deployment can lower it toward a proxy's body cap.
+  const adapter = new OpencodeGoAdapter(() => resolveOptions({ maxRequestImageBytes: 99 }), async () => "k", {});
+  assert.deepEqual(adapter.imageBudget(), { representation: "base64", maxBytes: 99 });
+});
+
+test("rpc models/known reports a refused settings section instead of staying silent", async () => {
+  const clean = stubCtx({ credentials: { resolve: async () => undefined } });
+  apply(clean.ctx, {});
+  const okReply = await clean.calls.rpc.dispatch({ type: "client-request", rpcId: "c1", method: "models/known", payload: { args: {} } }, undefined);
+  assert.equal(okReply.ok, true);
+  assert.equal(okReply.value.configError, null);
+
+  // The refused section is dropped whole and the adapter keeps the composition
+  // default, so the card's rows legitimately disagree with the persisted ids.
+  // The reply carries the reason, which is the only way the user learns why.
+  const broken = stubCtx({
+    credentials: { resolve: async () => undefined },
+    section: { modelCaps: [{ id: "deepseek-flash", surface: "responses", efforts: ["max"] }] },
+  });
+  apply(broken.ctx, {});
+  const badReply = await broken.calls.rpc.dispatch({ type: "client-request", rpcId: "c2", method: "models/known", payload: { args: {} } }, undefined);
+  assert.equal(badReply.ok, true);
+  assert.match(badReply.value.configError, /modelCaps\["deepseek-flash"\]\.efforts entry "max"/);
+  assert.ok(badReply.value.models.length > 1, "the composition default is what is served");
+
+  // A failure reply is left untouched: there is no successful value to annotate.
+  const noKey = stubCtx({ credentials: { resolve: async () => undefined } });
+  apply(noKey.ctx, {});
+  const failed = await noKey.calls.rpc.dispatch({ type: "client-request", rpcId: "c3", method: "models/refresh", payload: { args: {} } }, undefined);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.value, undefined);
+});
+
+test("offloaded occurrences become placeholder text and stay out of the request bytes", async () => {
+  const resolved = [];
+  const adapter = new OpencodeGoAdapter(() => resolveOptions({}), async () => "k", {
+    resolveAttachments: () => ({
+      imageHostPath: (ref) => { resolved.push(String(ref.attachmentId)); return undefined; },
+    }),
+    readFile: async () => { throw new Error("nothing here is readable"); },
+  });
+  const seen = {};
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async (url, init) => {
+    seen.body = JSON.parse(init.body);
+    return { ok: true, status: 200, headers: new Headers(), body: sseStream(['data: {"choices":[{"index":0,"finish_reason":"stop","delta":{"content":"ok"}}]}']) };
+  };
+  try {
+    for await (const _chunk of adapter.stream({
+      provider: PROVIDER,
+      model: "deepseek-v4-flash-vision-exp",
+      messages: [{
+        id: "1",
+        role: "user",
+        content: [
+          { type: "text", text: "what is this" },
+          { type: "image", offloaded: true, attachment: { attachmentId: "gone", mediaType: "image/png", bytes: 8, width: 8, height: 8 } },
+        ],
+        source: { kind: "user" },
+      }],
+    })) { /* drain */ }
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+  const body = JSON.stringify(seen.body);
+  assert.ok(body.includes("image omitted to fit request image limits"), body.slice(0, 300));
+  assert.ok(!body.includes("data:image/"), "a durable offload decision must not be reversed");
+  assert.deepEqual(resolved, [], "an offloaded occurrence is never resolved as bytes");
+});
+
+test("an over-budget request fails with the harness's offload request, before dispatch", async () => {
+  const adapter = new OpencodeGoAdapter(
+    () => resolveOptions({ maxRequestImageBytes: 8 * 1024 * 1024 }),
+    async () => "k",
+    {
+      resolveAttachments: () => ({ imageHostPath: () => "/copy/a.png" }),
+      mapHostPath: () => "/copy/a.png",
+      readFile: async () => { throw new Error("nothing may be read while the budget is exceeded"); },
+    },
+  );
+  const realFetch = globalThis.fetch;
+  globalThis.fetch = async () => { throw new Error("nothing may reach the provider"); };
+  const messages = Array.from({ length: 3 }, (_unused, index) => ({
+    id: String(index),
+    role: "user",
+    content: [
+      { type: "text", text: `shot ${index}` },
+      // A durable ref carries its encoded size, so the budget is decided
+      // without reading anything at all.
+      { type: "image", attachment: { attachmentId: `big-${index}`, mediaType: "image/png", bytes: 4 * 1024 * 1024, width: 4096, height: 4096 } },
+    ],
+    source: { kind: "user" },
+  }));
+  try {
+    await assert.rejects(
+      (async () => {
+        for await (const _chunk of adapter.stream({ provider: PROVIDER, model: "deepseek-v4-flash-vision-exp", messages })) { /* drain */ }
+      })(),
+      (error) => {
+        assert.equal(error.code, "IMAGE_OFFLOAD_REQUIRED");
+        // 3 x base64(4 MiB) ≈ 16.8 MiB against an 8 MiB budget: the two oldest go.
+        assert.equal(error.failure.offloadImages, 2);
+        return true;
+      },
+    );
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+function stubCtx({ credentials, providers = [], section = null } = {}) {
   const calls = { configurable: null, adapter: null, section: null, rpc: null };
   const ctx = {
     get: (name) => (name === "credentials" ? credentials : undefined),
@@ -253,8 +375,10 @@ function stubCtx({ credentials, providers = [] } = {}) {
       // Mirrors the real installSection: setSource + synchronous onChange.
       // An apply that omits onChange dies here, exactly like in production.
       // setSource carries the merged value: base (composition entry) wins
-      // when the user section is empty, like the real resolve().
-      if (deps.includes("settings")) cb({ settings: { installSection: (...args) => { calls.section = args; const hooks = args[4]; hooks.setSource(() => args[3]); hooks.onChange(); } } });
+      // when the user section is empty, like the real resolve(). `section`
+      // stands in for a settings.yaml layer, so a test can exercise the
+      // refusal path an invalid user section takes.
+      if (deps.includes("settings")) cb({ settings: { installSection: (...args) => { calls.section = args; const hooks = args[4]; const entry = args[3]; hooks.setSource(() => (section === null ? entry : { ...entry, ...section })); hooks.onChange(); } } });
       // The RPC channel registers a PHYSICAL webServer prefix route from the
       // nested ["connection", "webServer"] fiber (connection.rpc.handle is
       // deliberately NOT used — it resolves owner.webServer on the connection
@@ -637,8 +761,11 @@ test("per-model capability overrides classify an unknown id (issue #4)", async (
   try {
     const res = await refreshed.calls.rpc.dispatch({ type: "client-request", rpcId: "m4", method: "models/refresh", payload: { args: {} } }, undefined);
     assert.deepEqual(res.value.models, [
-      { id: "brand-new-thing", surface: "responses", input: ["text", "image"] },
-      { id: "mimo-v2.5", surface: "chat", input: ["text"] },
+      // `defaultEfforts` is what the card reconciles a stale level list against
+      // when the user hands the surface back to the default: an unknown id
+      // follows the chat surface but still offers no levels of its own.
+      { id: "brand-new-thing", surface: "responses", input: ["text", "image"], defaultEfforts: [] },
+      { id: "mimo-v2.5", surface: "chat", input: ["text"], defaultEfforts: ["low", "medium", "high"] },
     ]);
   } finally {
     globalThis.fetch = realFetch;
@@ -684,9 +811,9 @@ test("rpc models/refresh returns classified ids", async () => {
     const res = await calls.rpc.dispatch({ type: "client-request", rpcId: "m1", method: "models/refresh", payload: { args: {} } }, undefined);
     assert.equal(res.ok, true);
     assert.deepEqual(res.value.models, [
-      { id: "mimo-v2.5", surface: "chat", input: ["text"] },
-      { id: "muse-spark-1.3-contributor", surface: "responses", input: ["text", "image"] },
-      { id: "brand-new-thing", surface: "unknown" },
+      { id: "mimo-v2.5", surface: "chat", input: ["text"], defaultEfforts: ["low", "medium", "high"] },
+      { id: "muse-spark-1.3-contributor", surface: "responses", input: ["text", "image"], defaultEfforts: ["minimal", "low", "medium", "high", "xhigh"] },
+      { id: "brand-new-thing", surface: "unknown", defaultEfforts: [] },
     ]);
   } finally {
     globalThis.fetch = realFetch;
@@ -705,11 +832,13 @@ test("rpc models/known classifies the enabled ids with no key and no network", a
     const res = await calls.rpc.dispatch({ type: "client-request", rpcId: "m5", method: "models/known", payload: { args: {} } }, undefined);
     assert.equal(res.ok, true);
     // The card's rows carry the same classification the request path uses, so
-    // its reasoning presets can never offer a vocabulary the surface rejects.
+    // its reasoning presets can never offer a vocabulary the surface rejects;
+    // `defaultEfforts` is the list it reconciles against when the surface is
+    // handed back to the default.
     assert.deepEqual(res.value.models, [
-      { id: "mimo-v2.5", surface: "chat", input: ["text"] },
-      { id: "muse-spark-1.2-contributor", surface: "responses", input: ["text", "image"] },
-      { id: "brand-new-thing", surface: "responses", input: ["text", "image"] },
+      { id: "mimo-v2.5", surface: "chat", input: ["text"], defaultEfforts: ["low", "medium", "high"] },
+      { id: "muse-spark-1.2-contributor", surface: "responses", input: ["text", "image"], defaultEfforts: ["minimal", "low", "medium", "high", "xhigh"] },
+      { id: "brand-new-thing", surface: "responses", input: ["text", "image"], defaultEfforts: [] },
     ]);
   } finally {
     globalThis.fetch = realFetch;
@@ -1303,18 +1432,21 @@ test("client card persists per-model capability overrides", async () => {
     // row from offering the chat level vocabulary; models/refresh adds an id
     // the static view did not know.
     const known = [
-      { id: "deepseek-flash", surface: "unknown" },
-      { id: "mimo-v2.5", surface: "chat", input: ["text"] },
-      { id: "muse-spark-1.2-contributor", surface: "responses", input: ["text", "image"] },
+      { id: "deepseek-flash", surface: "unknown", defaultEfforts: [] },
+      { id: "mimo-v2.5", surface: "chat", input: ["text"], defaultEfforts: ["low", "medium", "high"] },
+      { id: "muse-spark-1.2-contributor", surface: "responses", input: ["text", "image"], defaultEfforts: ["minimal", "low", "medium", "high", "xhigh"] },
     ];
     const live = known.concat([{ id: "brand-new-thing", surface: "unknown" }]);
+    // The host's settings-section diagnostic rides the same reply; the test
+    // flips it to prove the card surfaces a refused section.
+    let knownConfigError = null;
     const registrations = [];
     const ctx = {
       effect: () => () => {},
       locale: { register: () => {} },
       settingsScope: { bind: () => scope },
       connection: { rpc: { call: async (_channel, method) => {
-        if (method === "models/known") return { ok: true, value: { models: known } };
+        if (method === "models/known") return { ok: true, value: { models: known, configError: knownConfigError } };
         if (method === "models/refresh") return { ok: true, value: { models: live } };
         return { ok: true, value: {} };
       } } },
@@ -1357,6 +1489,20 @@ test("client card persists per-model capability overrides", async () => {
       selects().find((s) => String(s.props.key).startsWith(`capsel-${id}-${field}:`));
     const togglesOf = () => ofType("button").filter((b) => String(b.children[0]).startsWith("models.options"));
     const summaryOf = (text) => ofType("span").find((s) => s.props.key === "stated" && String(s.children[0]).includes(text));
+    // Panels open independently, so a test that needs one specific panel must
+    // read its current state instead of clicking a positional index (which
+    // toggles whatever happens to be there, closing it half the time).
+    const panelToggle = (id) => {
+      const li = ofType("li").find((n) => String(n.props.key) === id);
+      return li === undefined ? undefined : elements(li).find((n) => n.type === "button" && String(n.children[0]).startsWith("models.options"));
+    };
+    const ensurePanel = (id, open) => {
+      const toggle = panelToggle(id);
+      assert.ok(toggle, `row ${id} must render a panel toggle`);
+      if (String(toggle.children[0]).includes(open ? "▾" : "▸") === open) return;
+      toggle.props.onClick();
+      render();
+    };
 
     // Rows stay a single tidy line: no capability control is rendered until a
     // row is expanded.
@@ -1382,6 +1528,22 @@ test("client card persists per-model capability overrides", async () => {
       ["responses", "text", "image"],
     );
     assert.ok(summaryOf("models.surface") === undefined, "nothing is stated before the user sets anything");
+
+    // A refused settings section is dropped whole by the host, so these rows can
+    // disagree with the persisted ids. The card must say so — with the host's
+    // own reason — instead of leaving the numbers looking arbitrary.
+    assert.equal(ofType("div").find((d) => d.props.key === "mcfgerr"), undefined, "no warning while the section is accepted");
+    knownConfigError = 'llm-opencode-go: modelCaps["deepseek-flash"].efforts entry "max" is not a responses-surface reasoning level';
+    await props.store.loadKnown();
+    render();
+    const warning = ofType("div").find((d) => d.props.key === "mcfgerr");
+    assert.ok(warning, "a refused settings section must show up on the card");
+    assert.ok(String(warning.children[0]).includes("models.configError"));
+    assert.ok(String(warning.children[0]).includes('efforts entry "max"'));
+    knownConfigError = null;
+    await props.store.loadKnown();
+    render();
+    assert.equal(ofType("div").find((d) => d.props.key === "mcfgerr"), undefined, "the warning clears with the section");
 
     // The unclassified row opens into three controls, all following the default.
     togglesOf()[0].props.onClick();
@@ -1476,6 +1638,67 @@ test("client card persists per-model capability overrides", async () => {
       ofType("li").some((li) => String(li.props.key) === "brand-new-thing"),
       "the refreshed catalog replaces the static rows",
     );
+
+    // ---- surface and levels are one validated pair -------------------------
+    // The host refuses the pair, not the field, so a stale level list under a
+    // newly chosen surface is not cosmetic: the whole section is dropped and
+    // routing silently falls back to the composition defaults. Choosing a
+    // surface therefore carries its levels along, in the SAME settings write.
+    const notice = () => ofType("div").find((d) => d.props.key === "ok");
+    ensurePanel("deepseek-flash", true);
+    ensurePanel("mimo-v2.5", false);
+    byField("deepseek-flash", "surface").props.onChange({ target: { value: "chat" } });
+    render();
+    byField("deepseek-flash", "efforts").props.onChange({ target: { value: "low,medium,high,max" } });
+    render();
+    assert.equal(byField("deepseek-flash", "efforts").props.value, "low,medium,high,max");
+    const writesBefore = writes.length;
+    byField("deepseek-flash", "surface").props.onChange({ target: { value: "responses" } });
+    assert.equal(writes.length, writesBefore + 1, "the surface and its levels commit in one write");
+    assert.deepEqual(writes.at(-1).value, [{
+      id: "deepseek-flash", surface: "responses", efforts: ["low", "medium", "high"], image: false,
+    }]);
+    render();
+    assert.equal(byField("deepseek-flash", "efforts").props.value, "low,medium,high", "the panel shows what survived");
+    assert.equal(String(notice().children[0]), "models.effortsAdjusted", "and the user is told what did not");
+
+    // A surface with no level vocabulary keeps nothing.
+    byField("deepseek-flash", "surface").props.onChange({ target: { value: "messages" } });
+    assert.deepEqual(writes.at(-1).value, [{ id: "deepseek-flash", surface: "messages", image: false }]);
+    render();
+    assert.equal(byField("deepseek-flash", "efforts").props.value, "", "messages clears the levels");
+    assert.equal(String(notice().children[0]), "models.effortsCleared");
+
+    // Handing the choice back to the default reconciles against what the request
+    // path offers for THIS id (the row's `defaultEfforts`), not against the
+    // surface just left: mimo-v2.5's table entry offers low/medium/high, so Max
+    // cannot survive the hand-back.
+    togglesOf()[1].props.onClick(); // mimo-v2.5
+    render();
+    ensurePanel("deepseek-flash", false);
+    ensurePanel("mimo-v2.5", true);
+    byField("mimo-v2.5", "surface").props.onChange({ target: { value: "chat" } });
+    render();
+    byField("mimo-v2.5", "efforts").props.onChange({ target: { value: "low,medium,high,max" } });
+    render();
+    byField("mimo-v2.5", "surface").props.onChange({ target: { value: "" } });
+    assert.deepEqual(writes.at(-1).value, [
+      { id: "deepseek-flash", surface: "messages", image: false },
+      { id: "mimo-v2.5", efforts: ["low", "medium", "high"] },
+    ]);
+    render();
+    assert.equal(byField("mimo-v2.5", "surface").props.value, "");
+    assert.equal(byField("mimo-v2.5", "efforts").props.value, "low,medium,high");
+    assert.equal(String(notice().children[0]), "models.effortsAdjusted");
+
+    // A level list the new surface fully accepts is left exactly as it is.
+    const keptBefore = writes.length;
+    byField("mimo-v2.5", "surface").props.onChange({ target: { value: "chat" } });
+    assert.equal(writes.length, keptBefore + 1);
+    assert.deepEqual(writes.at(-1).value, [
+      { id: "deepseek-flash", surface: "messages", image: false },
+      { id: "mimo-v2.5", surface: "chat", efforts: ["low", "medium", "high"] },
+    ]);
     for (const cleanup of cleanups) cleanup();
   } finally {
     if (previousWindow === undefined) delete globalThis.window;

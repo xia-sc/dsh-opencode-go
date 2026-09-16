@@ -5,8 +5,9 @@
 DeepSeek Harness 的 OpenCode Go LLM provider 插件：注册 `zen-go` 路由，
 每次出站推理请求都携带每会话稳定的 `x-opencode-session`。
 
-> **运行环境**：适配 DeepSeek Harness `0.1.5-rc.1`（peer 依赖
-> `@deepseek-ai/dsh-*` 声明为 `^0.1.5-rc.1`）。
+> **运行环境**：适配 DeepSeek Harness `0.1.6-alpha.1` 及以上（peer 依赖
+> `@deepseek-ai/dsh-*` 声明为 `^0.1.6-alpha.1`）。0.1.6 起图片 offload 由 adapter
+> 负责（见下文「图片超限」），本插件依赖该契约，所以下限是 0.1.6。
 
 - **三端面全接**：`chat/completions`（mimo / deepseek-v4 / glm / kimi / longcat / hy）、
   `responses`（grok / gpt-5.6-luna / muse-spark，含独立 `response.incomplete` 终态）、
@@ -29,12 +30,25 @@ DeepSeek Harness 的 OpenCode Go LLM provider 插件：注册 `zen-go` 路由，
   `["text","image"]`，图片经 attachment 服务读盘转 base64 内联
   （png/jpeg/webp/gif，单图 20MB 上限）；纯文本模型由 runtime 自动替换占位；
   未知 id 默认放行，服务端说了算。
+- **图片超限走 harness 的卸载回路**：一次请求内联图片总量（base64 后的字节数）超过
+  `maxRequestImageBytes`（默认 64 MiB）时，本插件**不自己丢图**，而是抛
+  `IMAGE_OFFLOAD_REQUIRED` 并附上「最旧的几张要丢」——
+  `dsh-compaction-image-offload` 记下这个决定并重试该步。丢图是**持久会话决定**，
+  只能由 harness 记录，所以判定一定发生在发请求之前（durable ref 自带字节数，
+  不读盘）。已由 harness 标记 `offloaded` 的图片一律按占位文本发送，**不会**被重新
+  内联——那是它自己的账，路由无权撤销。
 - **未知模型可手动归类**：官方 `/v1/models` 只给 id，新上线的模型（如 `deepseek-flash`）
   归类为 `unknown`，于是「选不了思考等级、也定不了多模态」（[#4](https://github.com/xia-sc/dsh-opencode-go/issues/4)）。
   现在可在设置卡里按模型手填**端面**（chat / responses / messages）、**思考档位**与
   **多模态**，留空即跟随内置表。端面决定路由与档位词表——chat 落 `reasoning_effort`、
   responses 落 `reasoning.effort`、messages 无档位词汇，所以档位选项会跟着端面走；
   手填的 `image` 会同时改写声明与图片准入判定，text-only 的已知模型不会因此被拒。
+- **端面与档位是一对，改端面时自动收敛档位**：宿主把 `surface` 与 `efforts` **当成一个组合**
+  校验（`surface: responses` 配 chat 才有的 `max` 会被整段拒绝）。所以卡片在改端面的**同一次
+  写入**里就把档位收敛好：新端面支持的保留，不支持的去掉并提示去掉了哪些；切到 messages 这类
+  没有档位词汇的端面则整体清空；把端面交回「跟随默认」时按**该模型自身的默认档位表**收敛
+  （未归类模型默认不提供档位，于是整体清空）。这样卡片写不出被拒绝的组合——否则整段设置会被
+  丢弃，路由静默退回默认值。
 - **内容块策略**：user 消息只承载用户载荷（text/image），其余块——reasoning、
   tool-call 这类 harness 注解，以及 merge-extensible 的新类型——一律丢弃而不报错。
   子代理结算通知会把子会话最后的 assistant 内容整段展开进 user 消息，这类块因此会
@@ -96,16 +110,27 @@ refs:
 | `apiKeyEnv` | `OPENCODE_GO_API_KEY` | credential ref 名 |
 | `apiBase` | `https://opencode.ai/zen/go` | 去掉尾部 `/v1` 前缀后的基址 |
 | `requestTimeoutMs` / `streamIdleTimeoutMs` | `60000` / `300000` | 建连+首包超时（响应头一到即停表，长流不受总时长限制） / 流空闲看门狗 |
+| `maxRequestImageBytes` | `67108864`（64 MiB） | 单请求内联图片总量上限，按**进请求体的 base64 字节**计；超了抛 `IMAGE_OFFLOAD_REQUIRED` 让 harness 卸载最旧的几张并重试。上游没公布请求体上限，所以这是部署取值：默认远高于日常截图流量，代理有更小的 body cap 就往下调 |
 | `enabledModels` | 全表 | 提供哪些模型（卡片勾选即改这里） |
-| `modelCaps` | `[]` | `[{id, contextWindow?, maxTokens?}]`，自填容量覆盖 |
+| `modelCaps` | `[]` | `[{id, contextWindow?, maxTokens?, surface?, image?, efforts?}]`，自填容量与能力覆盖 |
+
+设置卡会自己说明「设置没生效」：如果这一段被校验拒绝（例如 `modelCaps` 里
+`surface: responses` 配了 chat 才有的 `max` 档），插件会**整段丢弃并沿用默认值**，
+同时把拒绝原因显示在模型列表上方——否则卡片里的勾选数与实际路由会各说各话。
 
 ## 测试
 
 ```powershell
-node --test test/smoke.mjs
+node --test test/smoke.mjs        # 插件自洽（宿主全打桩）
+node test/host-compat.mjs         # 真宿主契约（真 dsh-llm + 真流语法不变量）
 # 联网探活（花一点点额度）：
 $env:OPENCODE_GO_API_KEY='<key>'; node --test test/smoke.mjs
 ```
+
+`test/host-compat.mjs` 直接 import 装在 `node_modules` 里的真实
+`@deepseek-ai/dsh-llm` / `dsh-invariants` / `cordis`，跑真 `llm` 服务与真流语法校验。
+宿主换版本后先跑它：`smoke.mjs` 把宿主面全打桩，宿主收紧契约（例如 0.1.6 把图片
+offload 从 runtime 挪进 adapter）它发现不了。
 
 ## 浏览器半构建
 

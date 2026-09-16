@@ -16,6 +16,38 @@
 			],
 			messages: []
 		};
+		/**
+		 * Every wire level id one surface accepts, derived from the presets the
+		 * levels select offers — a preset is a comma-joined subset of exactly
+		 * these ids, so the two lists cannot drift apart.
+		 */
+		function levelVocabulary(surface) {
+			var seen = [];
+			(EFFORT_PRESETS[surface] || []).forEach(function (preset) {
+				preset.value.split(",").forEach(function (id) {
+					if (id !== "" && seen.indexOf(id) < 0) seen.push(id);
+				});
+			});
+			return seen;
+		}
+		/**
+		 * The levels one surface change may keep: the stated ids that surface
+		 * still accepts, plus the ones that have to go. Returns null when the
+		 * whole list survives, so a no-op change writes nothing but the surface.
+		 *
+		 * The host validates `surface` and `efforts` as a pair, so a stale list is
+		 * not a cosmetic problem: the pair is refused and the whole settings
+		 * section is dropped, silently reverting routing to the defaults.
+		 */
+		function reconcileEfforts(stated, vocabulary) {
+			if (stated === undefined) return null;
+			var kept = stated.filter(function (id) { return vocabulary.indexOf(id) >= 0; });
+			if (kept.length === stated.length) return null;
+			return {
+				kept: kept,
+				dropped: stated.filter(function (id) { return kept.indexOf(id) < 0; })
+			};
+		}
 		function fmtTokens(n) {
 			if (n >= 1000000) return (Math.round(n / 100000) / 10) + "M";
 			if (n >= 1000) return (Math.round(n / 100) / 10) + "K";
@@ -329,6 +361,13 @@
 					}
 				}, rows.every(function (row) { return enabled && enabled.indexOf(row.id) >= 0; }) ? t("models.selectNone") : t("models.selectAll"))
 			));
+			// A section the host refused leaves these rows authoritative and the
+			// checkboxes persisted, so the two disagree by design. Say so, with the
+			// host's own reason, instead of letting the numbers look arbitrary.
+			if (st.configError) {
+				children.push(h("div", { key: "mcfgerr", style: S.error },
+					t("models.configError") + st.configError));
+			}
 			if (rows.length === 0) {
 				children.push(h("div", { key: "mhint", style: S.meta }, t("models.hint")));
 			} else {
@@ -382,6 +421,26 @@
 						effortOptions.push({ value: effortValue, label: effortValue.split(",").join(" / ") });
 					}
 					var isOpen = openRows[row.id] === true;
+					/**
+					 * Commit a surface choice. The surface and its levels are one
+					 * validated pair on the host, so the change writes both at once:
+					 * the levels that survive the new surface stay, and any the new
+					 * surface cannot carry are dropped — handing the choice back to
+					 * the default (`""`) uses the level list the request path would
+					 * itself offer for this id. Nothing is left for the host to
+					 * refuse, so the section cannot silently fall back.
+					 */
+					var applySurface = function (value) {
+						var vocabulary = value === "" ? (row.defaultEfforts || []) : levelVocabulary(value);
+						var change = reconcileEfforts(cap.efforts, vocabulary);
+						var patch = { surface: value === "" ? null : value };
+						if (change !== null) patch.efforts = change.kept.length === 0 ? null : change.kept;
+						store.setModelCapFields(row.id, patch);
+						if (change === null) return;
+						store.note(change.kept.length === 0
+							? t("models.effortsCleared")
+							: t("models.effortsAdjusted", { kept: change.kept.join(" / "), dropped: change.dropped.join(" / ") }));
+					};
 					// What this row states by hand, so the collapsed line still tells
 					// the truth about a model the user configured.
 					var stated = [];
@@ -434,15 +493,22 @@
 							}
 						},
 							h("div", { key: "grid", style: S.panelGrid },
-								field("surface", t("models.surface"), capSelect(
-									"surface",
-									cap.surface || "",
-									[{ value: "", label: t("models.follow") }].concat(SURFACE_VALUES.map(function (value) {
-										return { value: value, label: value };
-									})),
-									surfaceLabel,
-									function (value) { return value === "" ? null : value; }
-								)),
+								// Deliberately NOT capSelect: this one control writes a
+								// validated pair, and hiding that behind the generic
+								// single-field helper is exactly how the levels once went
+								// stale against a newly chosen surface.
+								field("surface", t("models.surface"), h("select", {
+									key: "capsel-" + row.id + "-surface:" + (cap.surface || ""),
+									style: S.select,
+									value: cap.surface || "",
+									disabled: st.busy !== null,
+									title: surfaceLabel,
+									onChange: function (e) { applySurface(e.target.value); }
+								}, [{ value: "", label: t("models.follow") }].concat(SURFACE_VALUES.map(function (value) {
+									return { value: value, label: value };
+								})).map(function (opt) {
+									return h("option", { key: opt.value, value: opt.value }, opt.label);
+								}))),
 								field("efforts", t("models.efforts"), capSelect(
 									"efforts",
 									effortValue,

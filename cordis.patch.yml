@@ -1,9 +1,11 @@
-# @dsh-plugins/dsh-opencode-go — host-only bundle layer.
+# @dsh-plugins/dsh-opencode-go — bundle layer: one host row, plus the browser
+# half declared separately under `dsh.client` in package.json.
 #
-# Pure host-side provider plugin (no browser half): registers the `opencode-go`
-# provider route on ctx.llm. All outbound inference requests carry
-# `x-opencode-session` (stable per conversation, from GenerateOptions.sessionId)
-# plus the mandatory harness attribution headers.
+# The host row registers the `zen-go` provider route on ctx.llm (deliberately
+# NOT `opencode-go`: that name is common for user-owned pi-ai profiles and the
+# llm registry allows exactly one owner per route). All outbound inference
+# requests carry `x-opencode-session` (stable per conversation, from
+# GenerateOptions.sessionId) plus the mandatory harness attribution headers.
 #
 # `name` must be the FULL package specifier as installed in the profile's
 # node_modules (pnpm links packages by their true scoped name). Quote the value:

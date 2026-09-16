@@ -6,8 +6,10 @@ An LLM provider plugin for DeepSeek Harness that serves OpenCode Go: it register
 the `zen-go` route and sends a stable per-conversation `x-opencode-session`
 header on every outbound inference request.
 
-> **Runtime**: adapted to DeepSeek Harness `0.1.5-rc.1` (peer dependencies
-> `@deepseek-ai/dsh-*` declared as `^0.1.5-rc.1`).
+> **Runtime**: adapted to DeepSeek Harness `0.1.6-alpha.1` and above (peer
+> dependencies `@deepseek-ai/dsh-*` declared as `^0.1.6-alpha.1`). From 0.1.6 on,
+> image offload is the adapter's job (see "Over-budget images" below); this
+> plugin relies on that contract, which is what sets the floor.
 
 - **All three surfaces**: `chat/completions` (mimo / deepseek-v4 / glm / kimi /
   longcat / hy), `responses` (grok / gpt-5.6-luna / muse-spark, including the
@@ -43,6 +45,17 @@ header on every outbound inference request.
   placeholders); unknown ids stay permissive and the server decides. Images
   resolve from the durable attachment store to inline base64 data URLs per
   surface (png/jpeg/webp/gif, 20 MB cap per image).
+- **Over-budget images take the harness's offload path**: when one request's
+  inline image bytes (the base64 the body carries) exceed
+  `maxRequestImageBytes` (64 MiB by default) this plugin does **not** drop
+  images itself — it fails with `IMAGE_OFFLOAD_REQUIRED` naming how many of the
+  oldest occurrences must go, and `dsh-compaction-image-offload` records that
+  decision and retries the step. Dropping images is a **durable session
+  decision**, so only the harness may record it, and the check always happens
+  before dispatch (a durable ref carries its encoded size, so nothing is read).
+  Occurrences the harness already marked `offloaded` always travel as
+  placeholder text and are never re-inlined — that bookkeeping is the harness's,
+  not a route's to reverse.
 - **Unclassified models can be described by hand**: the operator's `/v1/models`
   discloses ids only, so a newly served model (say `deepseek-flash`) is
   classified `unknown` — which is why neither a reasoning level nor a modality
@@ -56,6 +69,17 @@ header on every outbound inference request.
   pick. A hand-declared `image` rewrites the declaration *and* the image-admission
   check, so a table-known text-only id is not rejected after you declare it
   multimodal.
+- **Surface and levels are one pair, and changing the surface settles the
+  levels**: the host validates `surface` and `efforts` *together*, so
+  `surface: responses` carrying the chat-only `max` is refused as a whole. The
+  card therefore conforms the levels in the **same settings write** that changes
+  the surface: what the new surface can carry is kept, what it cannot is dropped
+  and named in a notice; switching to a surface with no level vocabulary at all
+  (messages) clears them; handing the choice back to `default` reconciles against
+  **that model's own default level list** (an unclassified id offers none, so the
+  list is cleared). The card can therefore never write a combination the host
+  would refuse — which would otherwise drop the whole section and silently revert
+  routing to the composition defaults.
 - **Content-block policy**: a user message carries user payload (`text`/`image`)
   only; every other block — harness annotations such as `reasoning` and
   `tool-call`, plus merge-extensible additions — is dropped rather than
@@ -129,16 +153,31 @@ settings card.
 | `apiKeyEnv` | `OPENCODE_GO_API_KEY` | credential ref name |
 | `apiBase` | `https://opencode.ai/zen/go` | base URL without the trailing `/v1` prefix |
 | `requestTimeoutMs` / `streamIdleTimeoutMs` | `60000` / `300000` | connect + first-byte timeout (timer stops at response headers; long streams aren't capped by total time) / stream idle watchdog |
+| `maxRequestImageBytes` | `67108864` (64 MiB) | inline image budget for one request, counted in the **base64 bytes the body carries**; above it the route fails with `IMAGE_OFFLOAD_REQUIRED` so the harness drops the oldest occurrences and retries. The operator publishes no request-size limit, so this is a deployment value: the default sits far above ordinary screenshot traffic — lower it toward a proxy's body cap |
 | `enabledModels` | whole table | which models are offered (the card checkboxes edit this) |
-| `modelCaps` | `[]` | `[{id, contextWindow?, maxTokens?}]`, user-filled capacity overrides |
+| `modelCaps` | `[]` | `[{id, contextWindow?, maxTokens?, surface?, image?, efforts?}]`, user-filled capacity and capability overrides |
+
+The settings card reports its own refusals: when the section fails validation
+(say `modelCaps` pairs `surface: responses` with the chat-only `max` level) the
+plugin drops it whole and keeps the defaults, and the reason is shown above the
+model list — otherwise the card's selection count and the request path would
+each tell their own story.
 
 ## Test
 
 ```powershell
-node --test test/smoke.mjs
+node --test test/smoke.mjs        # plugin self-consistency (host fully stubbed)
+node test/host-compat.mjs         # real host contracts (real dsh-llm + real stream invariant)
 # live probes (spend a tiny amount of quota):
 $env:OPENCODE_GO_API_KEY='<key>'; node --test test/smoke.mjs
 ```
+
+`test/host-compat.mjs` imports the real `@deepseek-ai/dsh-llm`,
+`dsh-invariants` and `cordis` from `node_modules` and drives the real `llm`
+service plus the real stream-grammar invariant. Run it first after a host
+upgrade: `smoke.mjs` stubs every host surface, so it cannot notice the host
+tightening a contract (0.1.6 moving image offload from the runtime into the
+adapter is exactly that kind of change).
 
 ## Known limitations
 
